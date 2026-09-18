@@ -1,1704 +1,881 @@
 import { useState } from "react";
-const API_URL =
-  import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
-import {
-  Upload,
-  Link,
-  Briefcase,
-  Sparkles,
-  FileText,
-  ArrowRight,
-  CheckCircle2,
-  AlertCircle,
-  Loader2,
-  Target,
-  Download,
-  Mail,
-} from "lucide-react";
+import "./App.css";
 
+const API_URL =
+  import.meta.env.VITE_API_URL ||
+  "https://ai-job-application-agent-1lqj.onrender.com";
 
 function App() {
+  const [resumeFile, setResumeFile] = useState(null);
+  const [jobUrl, setJobUrl] = useState("");
+  const [jobDescription, setJobDescription] = useState("");
 
-  // =======================================================
-  // STATE
-  // =======================================================
+  const [analysis, setAnalysis] = useState(null);
+  const [tailoredResume, setTailoredResume] = useState("");
+  const [coverLetter, setCoverLetter] = useState("");
 
-  const [resume, setResume] =
-    useState(null);
+  const [loading, setLoading] = useState(false);
+  const [tailoring, setTailoring] = useState(false);
+  const [generatingCoverLetter, setGeneratingCoverLetter] = useState(false);
 
-  const [jobUrl, setJobUrl] =
-    useState("");
+  const [error, setError] = useState("");
 
-  const [jobDescription, setJobDescription] =
-    useState("");
-
-  const [loading, setLoading] =
-    useState(false);
-
-  const [tailoring, setTailoring] =
-    useState(false);
-
-  const [generatingLetter, setGeneratingLetter] =
-    useState(false);
-
-  const [downloadingResume, setDownloadingResume] =
-    useState(false);
-
-  const [downloadingLetter, setDownloadingLetter] =
-    useState(false);
-
-  const [analysis, setAnalysis] =
-    useState(null);
-
-  const [tailoredResume, setTailoredResume] =
-    useState("");
-
-  const [coverLetter, setCoverLetter] =
-    useState("");
-
-  const [error, setError] =
-    useState("");
-
-
-  // =======================================================
-  // RESUME UPLOAD
-  // =======================================================
+  const [resumeDownloading, setResumeDownloading] = useState(false);
+  const [coverLetterDownloading, setCoverLetterDownloading] = useState(false);
 
   const handleResumeChange = (event) => {
-
-    const file =
-      event.target.files[0];
+    const file = event.target.files?.[0];
 
     if (!file) {
       return;
     }
 
-    const fileName =
-      file.name.toLowerCase();
+    const allowedTypes = [
+      "application/pdf",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ];
 
-    const validFile =
-      fileName.endsWith(".pdf") ||
-      fileName.endsWith(".docx");
+    const fileName = file.name.toLowerCase();
 
-    if (!validFile) {
+    const validExtension =
+      fileName.endsWith(".pdf") || fileName.endsWith(".docx");
 
-      setError(
-        "Please upload a PDF or DOCX resume."
-      );
-
-      setResume(null);
-
+    if (!validExtension && !allowedTypes.includes(file.type)) {
+      setError("Please upload a PDF or DOCX resume.");
       return;
     }
 
+    setResumeFile(file);
     setError("");
-
-    setResume(file);
-
-    setAnalysis(null);
-    setTailoredResume("");
-    setCoverLetter("");
   };
 
-
-  // =======================================================
-  // ANALYZE
-  // =======================================================
-
-  const handleAnalyze = async () => {
-
-    setError("");
-
-    setAnalysis(null);
-    setTailoredResume("");
-    setCoverLetter("");
-
-    if (!resume) {
-
-      setError(
-        "Please upload your resume first."
-      );
-
-      return;
+  const validateInput = () => {
+    if (!resumeFile) {
+      setError("Please upload your resume first.");
+      return false;
     }
 
     if (!jobDescription.trim()) {
+      setError("Please paste the job description.");
+      return false;
+    }
 
-      setError(
-        "Please paste the complete job description."
-      );
+    return true;
+  };
 
+  const handleAnalyze = async () => {
+    setError("");
+    setAnalysis(null);
+    setTailoredResume("");
+    setCoverLetter("");
+
+    if (!validateInput()) {
       return;
     }
 
+    setLoading(true);
+
     try {
+      const formData = new FormData();
 
-      setLoading(true);
+      formData.append("resume", resumeFile);
+      formData.append("job_description", jobDescription);
 
-      const formData =
-        new FormData();
+      if (jobUrl.trim()) {
+        formData.append("job_url", jobUrl.trim());
+      }
 
-      formData.append(
-        "resume",
-        resume
-      );
-
-      formData.append(
-        "job_description",
-        jobDescription
-      );
-
-      const response =
-        await fetch(
-          "http://127.0.0.1:8000/analyze",
-          {
-            method: "POST",
-            body: formData,
-          }
-        );
+      const response = await fetch(`${API_URL}/analyze`, {
+        method: "POST",
+        body: formData,
+      });
 
       if (!response.ok) {
+        let message = `Analysis failed (${response.status})`;
 
-        throw new Error(
-          `Backend returned HTTP ${response.status}`
-        );
+        try {
+          const errorData = await response.json();
+
+          if (errorData.detail) {
+            message = errorData.detail;
+          }
+        } catch {
+          // Ignore JSON parsing errors
+        }
+
+        throw new Error(message);
       }
 
-      const data =
-        await response.json();
+      const data = await response.json();
 
-      if (!data.success) {
-
-        throw new Error(
-          data.error ||
-          "AI analysis failed."
-        );
-      }
-
-      setAnalysis(
-        data.analysis
-      );
-
-      setTimeout(() => {
-
-        document
-          .getElementById(
-            "analysis-results"
-          )
-          ?.scrollIntoView({
-            behavior: "smooth",
-          });
-
-      }, 100);
-
+      setAnalysis(data);
     } catch (err) {
-
-      console.error(err);
+      console.error("Analyze error:", err);
 
       setError(
         err.message ||
-        "Could not connect to the Python AI backend."
+          "Failed to connect to the backend. Please try again."
       );
-
     } finally {
-
       setLoading(false);
     }
   };
 
+  const handleTailorResume = async () => {
+    setError("");
 
-  // =======================================================
-  // TAILOR RESUME
-  // =======================================================
+    if (!resumeFile) {
+      setError("Please upload your resume first.");
+      return;
+    }
 
-  const handleTailorResume =
-    async () => {
+    if (!jobDescription.trim()) {
+      setError("Please paste the job description first.");
+      return;
+    }
 
-      setError("");
+    setTailoring(true);
 
-      if (!resume) {
+    try {
+      const formData = new FormData();
 
-        setError(
-          "Please upload your resume first."
-        );
+      formData.append("resume", resumeFile);
+      formData.append("job_description", jobDescription);
 
-        return;
-      }
+      const response = await fetch(`${API_URL}/tailor`, {
+        method: "POST",
+        body: formData,
+      });
 
-      if (!jobDescription.trim()) {
+      if (!response.ok) {
+        let message = `Resume tailoring failed (${response.status})`;
 
-        setError(
-          "Please provide the job description."
-        );
+        try {
+          const errorData = await response.json();
 
-        return;
-      }
-
-      if (!analysis) {
-
-        setError(
-          "Analyze the job before tailoring your resume."
-        );
-
-        return;
-      }
-
-      try {
-
-        setTailoring(true);
-
-        const formData =
-          new FormData();
-
-        formData.append(
-          "resume",
-          resume
-        );
-
-        formData.append(
-          "job_description",
-          jobDescription
-        );
-
-        formData.append(
-          "analysis",
-          JSON.stringify(analysis)
-        );
-
-        const response =
-          await fetch(
-            "http://127.0.0.1:8000/tailor",
-            {
-              method: "POST",
-              body: formData,
-            }
-          );
-
-        if (!response.ok) {
-
-          throw new Error(
-            `Backend returned HTTP ${response.status}`
-          );
+          if (errorData.detail) {
+            message = errorData.detail;
+          }
+        } catch {
+          // Ignore JSON parsing errors
         }
 
-        const data =
-          await response.json();
+        throw new Error(message);
+      }
 
-        if (!data.success) {
+      const data = await response.json();
 
-          throw new Error(
-            data.error ||
-            "Resume tailoring failed."
-          );
+      setTailoredResume(
+        data.tailored_resume ||
+          data.resume ||
+          data.content ||
+          data.text ||
+          ""
+      );
+    } catch (err) {
+      console.error("Tailor error:", err);
+
+      setError(
+        err.message ||
+          "Failed to tailor the resume. Please try again."
+      );
+    } finally {
+      setTailoring(false);
+    }
+  };
+
+  const handleGenerateCoverLetter = async () => {
+    setError("");
+
+    if (!resumeFile) {
+      setError("Please upload your resume first.");
+      return;
+    }
+
+    if (!jobDescription.trim()) {
+      setError("Please paste the job description first.");
+      return;
+    }
+
+    setGeneratingCoverLetter(true);
+
+    try {
+      const formData = new FormData();
+
+      formData.append("resume", resumeFile);
+      formData.append("job_description", jobDescription);
+
+      const response = await fetch(`${API_URL}/cover-letter`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        let message = `Cover letter generation failed (${response.status})`;
+
+        try {
+          const errorData = await response.json();
+
+          if (errorData.detail) {
+            message = errorData.detail;
+          }
+        } catch {
+          // Ignore JSON parsing errors
         }
 
-        setTailoredResume(
-          data.tailored_resume
-        );
-
-        setTimeout(() => {
-
-          document
-            .getElementById(
-              "tailored-resume"
-            )
-            ?.scrollIntoView({
-              behavior: "smooth",
-            });
-
-        }, 100);
-
-      } catch (err) {
-
-        console.error(err);
-
-        setError(
-          err.message ||
-          "Could not tailor the resume."
-        );
-
-      } finally {
-
-        setTailoring(false);
-      }
-    };
-
-
-  // =======================================================
-  // GENERATE COVER LETTER
-  // =======================================================
-
-  const handleGenerateCoverLetter =
-    async () => {
-
-      setError("");
-
-      if (!resume) {
-
-        setError(
-          "Please upload your resume first."
-        );
-
-        return;
+        throw new Error(message);
       }
 
-      if (!jobDescription.trim()) {
+      const data = await response.json();
 
-        setError(
-          "Please provide the job description."
-        );
+      setCoverLetter(
+        data.cover_letter ||
+          data.content ||
+          data.text ||
+          ""
+      );
+    } catch (err) {
+      console.error("Cover letter error:", err);
 
-        return;
-      }
+      setError(
+        err.message ||
+          "Failed to generate the cover letter. Please try again."
+      );
+    } finally {
+      setGeneratingCoverLetter(false);
+    }
+  };
 
-      if (!analysis) {
+  const downloadBlob = (blob, filename) => {
+    const url = window.URL.createObjectURL(blob);
 
-        setError(
-          "Analyze the job first."
-        );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
 
-        return;
-      }
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
 
-      if (!tailoredResume) {
+    window.URL.revokeObjectURL(url);
+  };
 
-        setError(
-          "Tailor the resume before generating the cover letter."
-        );
+  const handleDownloadResume = async () => {
+    setError("");
 
-        return;
-      }
+    if (!resumeFile) {
+      setError("Please upload your resume first.");
+      return;
+    }
 
-      try {
+    if (!jobDescription.trim()) {
+      setError("Please provide the job description first.");
+      return;
+    }
 
-        setGeneratingLetter(true);
+    setResumeDownloading(true);
 
-        const formData =
-          new FormData();
+    try {
+      const formData = new FormData();
 
-        formData.append(
-          "resume",
-          resume
-        );
+      formData.append("resume", resumeFile);
+      formData.append("job_description", jobDescription);
 
-        formData.append(
-          "job_description",
-          jobDescription
-        );
+      const response = await fetch(`${API_URL}/download-resume`, {
+        method: "POST",
+        body: formData,
+      });
 
-        formData.append(
-          "analysis",
-          JSON.stringify(analysis)
-        );
+      if (!response.ok) {
+        let message = `Resume download failed (${response.status})`;
 
-        formData.append(
-          "tailored_resume",
-          tailoredResume
-        );
+        try {
+          const errorData = await response.json();
 
-        const response =
-          await fetch(
-            "http://127.0.0.1:8000/cover-letter",
-            {
-              method: "POST",
-              body: formData,
-            }
-          );
-
-        if (!response.ok) {
-
-          throw new Error(
-            `Backend returned HTTP ${response.status}`
-          );
+          if (errorData.detail) {
+            message = errorData.detail;
+          }
+        } catch {
+          // Ignore JSON parsing errors
         }
 
-        const data =
-          await response.json();
+        throw new Error(message);
+      }
 
-        if (!data.success) {
+      const blob = await response.blob();
 
-          throw new Error(
-            data.error ||
-            "Cover letter generation failed."
-          );
+      downloadBlob(blob, "tailored_resume.docx");
+    } catch (err) {
+      console.error("Resume download error:", err);
+
+      setError(
+        err.message ||
+          "Failed to download the tailored resume."
+      );
+    } finally {
+      setResumeDownloading(false);
+    }
+  };
+
+  const handleDownloadCoverLetter = async () => {
+    setError("");
+
+    if (!resumeFile) {
+      setError("Please upload your resume first.");
+      return;
+    }
+
+    if (!jobDescription.trim()) {
+      setError("Please provide the job description first.");
+      return;
+    }
+
+    setCoverLetterDownloading(true);
+
+    try {
+      const formData = new FormData();
+
+      formData.append("resume", resumeFile);
+      formData.append("job_description", jobDescription);
+
+      const response = await fetch(
+        `${API_URL}/download-cover-letter`,
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      if (!response.ok) {
+        let message = `Cover letter download failed (${response.status})`;
+
+        try {
+          const errorData = await response.json();
+
+          if (errorData.detail) {
+            message = errorData.detail;
+          }
+        } catch {
+          // Ignore JSON parsing errors
         }
 
-        setCoverLetter(
-          data.cover_letter
-        );
-
-        setTimeout(() => {
-
-          document
-            .getElementById(
-              "cover-letter"
-            )
-            ?.scrollIntoView({
-              behavior: "smooth",
-            });
-
-        }, 100);
-
-      } catch (err) {
-
-        console.error(err);
-
-        setError(
-          err.message ||
-          "Could not generate the cover letter."
-        );
-
-      } finally {
-
-        setGeneratingLetter(false);
-      }
-    };
-
-
-  // =======================================================
-  // DOWNLOAD RESUME
-  // =======================================================
-
-  const handleDownloadResume =
-    async () => {
-
-      if (!tailoredResume) {
-        return;
+        throw new Error(message);
       }
 
-      try {
+      const blob = await response.blob();
 
-        setDownloadingResume(true);
+      downloadBlob(blob, "cover_letter.docx");
+    } catch (err) {
+      console.error("Cover letter download error:", err);
 
-        const formData =
-          new FormData();
+      setError(
+        err.message ||
+          "Failed to download the cover letter."
+      );
+    } finally {
+      setCoverLetterDownloading(false);
+    }
+  };
 
-        formData.append(
-          "tailored_resume",
-          tailoredResume
-        );
+  const getValue = (object, keys, fallback = "") => {
+    if (!object) {
+      return fallback;
+    }
 
-        const response =
-          await fetch(
-            "http://127.0.0.1:8000/download-resume",
-            {
-              method: "POST",
-              body: formData,
-            }
-          );
-
-        if (!response.ok) {
-
-          throw new Error(
-            "Could not create the resume document."
-          );
-        }
-
-        const blob =
-          await response.blob();
-
-        const url =
-          window.URL.createObjectURL(
-            blob
-          );
-
-        const link =
-          document.createElement("a");
-
-        link.href = url;
-
-        link.download =
-          "Tailored_Resume.docx";
-
-        document.body.appendChild(link);
-
-        link.click();
-
-        link.remove();
-
-        window.URL.revokeObjectURL(url);
-
-      } catch (err) {
-
-        console.error(err);
-
-        setError(
-          err.message ||
-          "Could not download the resume."
-        );
-
-      } finally {
-
-        setDownloadingResume(false);
+    for (const key of keys) {
+      if (
+        object[key] !== undefined &&
+        object[key] !== null
+      ) {
+        return object[key];
       }
-    };
+    }
 
+    return fallback;
+  };
 
-  // =======================================================
-  // DOWNLOAD COVER LETTER
-  // =======================================================
+  const matchingSkills = getValue(
+    analysis,
+    ["matching_skills", "matchingSkills", "skills"],
+    []
+  );
 
-  const handleDownloadCoverLetter =
-    async () => {
+  const skillGaps = getValue(
+    analysis,
+    ["skill_gaps", "skillGaps", "gaps"],
+    []
+  );
 
-      if (!coverLetter) {
-        return;
-      }
+  const keywords = getValue(
+    analysis,
+    ["keywords", "important_keywords", "importantKeywords"],
+    []
+  );
 
-      try {
+  const experienceMatch = getValue(
+    analysis,
+    ["experience_match", "experienceMatch"],
+    null
+  );
 
-        setDownloadingLetter(true);
+  const matchScore = getValue(
+    analysis,
+    ["match_score", "matchScore", "score"],
+    null
+  );
 
-        const formData =
-          new FormData();
+  const jobTitle = getValue(
+    analysis,
+    ["job_title", "jobTitle", "title"],
+    "Job"
+  );
 
-        formData.append(
-          "cover_letter",
-          coverLetter
-        );
+  const assessment = getValue(
+    analysis,
+    ["assessment", "summary", "analysis"],
+    ""
+  );
 
-        const response =
-          await fetch(
-            "http://127.0.0.1:8000/download-cover-letter",
-            {
-              method: "POST",
-              body: formData,
-            }
-          );
+  const renderList = (items) => {
+    if (!Array.isArray(items)) {
+      return (
+        <p className="muted">
+          {items || "No information available."}
+        </p>
+      );
+    }
 
-        if (!response.ok) {
+    if (items.length === 0) {
+      return (
+        <p className="muted">
+          No information available.
+        </p>
+      );
+    }
 
-          throw new Error(
-            "Could not create the cover letter document."
-          );
-        }
-
-        const blob =
-          await response.blob();
-
-        const url =
-          window.URL.createObjectURL(
-            blob
-          );
-
-        const link =
-          document.createElement("a");
-
-        link.href = url;
-
-        link.download =
-          "Cover_Letter.docx";
-
-        document.body.appendChild(link);
-
-        link.click();
-
-        link.remove();
-
-        window.URL.revokeObjectURL(url);
-
-      } catch (err) {
-
-        console.error(err);
-
-        setError(
-          err.message ||
-          "Could not download the cover letter."
-        );
-
-      } finally {
-
-        setDownloadingLetter(false);
-      }
-    };
-
-
-  // =======================================================
-  // SCORE LABEL
-  // =======================================================
-
-  const getScoreLabel =
-    (score) => {
-
-      if (score >= 80) {
-        return "Strong Match";
-      }
-
-      if (score >= 60) {
-        return "Moderate Match";
-      }
-
-      return "Needs Improvement";
-    };
-
-
-  // =======================================================
-  // UI
-  // =======================================================
+    return (
+      <ul className="result-list">
+        {items.map((item, index) => (
+          <li key={index}>
+            {typeof item === "string"
+              ? item
+              : JSON.stringify(item)}
+          </li>
+        ))}
+      </ul>
+    );
+  };
 
   return (
-
-    <div className="min-h-screen bg-slate-950 text-white">
-
-      {/* =================================================
-          HEADER
-      ================================================= */}
-
-      <header className="border-b border-slate-800">
-
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
-
-          <div className="flex items-center gap-3">
-
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-600">
-
-              <Sparkles size={21} />
-
-            </div>
-
-            <div>
-
-              <h1 className="text-lg font-semibold">
-                AI Job Application Agent
-              </h1>
-
-              <p className="text-xs text-slate-500">
-                Intelligent application assistant
-              </p>
-
-            </div>
-
-          </div>
-
-
-          <nav className="hidden gap-8 text-sm md:flex">
-
-            <span className="text-white">
-              Dashboard
-            </span>
-
-            <span className="text-slate-500">
-              Applications
-            </span>
-
-            <span className="text-slate-500">
-              My Resume
-            </span>
-
-            <span className="text-slate-500">
-              Settings
-            </span>
-
-          </nav>
-
+    <div className="app">
+      <header className="hero">
+        <div className="badge">
+          ✨ AI-powered job applications
         </div>
 
+        <h1>
+          Turn a job posting into a{" "}
+          <span>stronger application.</span>
+        </h1>
+
+        <p>
+          Upload your resume, provide a job posting, and
+          let the AI analyze the opportunity, identify
+          gaps, tailor your resume, and prepare your cover
+          letter.
+        </p>
       </header>
 
-
-      {/* =================================================
-          MAIN
-      ================================================= */}
-
-      <main className="mx-auto max-w-7xl px-6 py-12">
-
-
-        {/* HERO */}
-
-        <section className="mb-10 max-w-4xl">
-
-          <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-violet-500/30 bg-violet-500/10 px-3 py-1.5 text-sm text-violet-300">
-
-            <Sparkles size={15} />
-
-            AI-powered job applications
-
+      {error && (
+        <div className="error-box">
+          <div className="error-title">
+            ⚠️ Something went wrong
           </div>
 
+          <div className="error-message">
+            {error}
+          </div>
+        </div>
+      )}
 
-          <h2 className="text-4xl font-bold tracking-tight md:text-5xl">
-
-            Turn a job posting into a
-
-            <span className="text-violet-400">
-              {" "}stronger application.
-            </span>
-
-          </h2>
-
-
-          <p className="mt-5 max-w-3xl text-lg leading-8 text-slate-400">
-
-            Upload your resume, provide a job posting,
-            and let the AI analyze the opportunity,
-            identify gaps, tailor your resume,
-            and prepare your cover letter.
-
-          </p>
-
-        </section>
-
-
-        {/* =================================================
-            ERROR
-        ================================================= */}
-
-        {error && (
-
-          <div className="mb-6 flex items-start gap-3 rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-red-300">
-
-            <AlertCircle
-              size={20}
-              className="mt-0.5 shrink-0"
-            />
+      <main className="main-grid">
+        {/* RESUME */}
+        <section className="card">
+          <div className="card-header">
+            <div className="icon blue">↑</div>
 
             <div>
-
-              <p className="font-semibold">
-                Something went wrong
-              </p>
-
-              <p className="mt-1 text-sm">
-                {error}
-              </p>
-
+              <h2>Your Resume</h2>
+              <p>PDF or Word document</p>
             </div>
-
           </div>
 
-        )}
-
-
-        {/* =================================================
-            INPUTS
-        ================================================= */}
-
-        <div className="grid gap-6 lg:grid-cols-3">
-
-
-          {/* RESUME */}
-
-          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
-
-            <div className="mb-5 flex items-center gap-3">
-
-              <div className="rounded-xl bg-blue-500/10 p-3 text-blue-400">
-
-                <Upload size={20} />
-
-              </div>
-
-              <div>
-
-                <h3 className="font-semibold">
-                  Your Resume
-                </h3>
-
-                <p className="text-sm text-slate-500">
-                  PDF or Word document
-                </p>
-
-              </div>
-
-            </div>
-
-
-            <label className="flex min-h-48 cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-950/50 px-5 text-center transition hover:border-violet-500">
-
-              <Upload
-                className="mb-3 text-slate-500"
-                size={28}
-              />
-
-
-              {resume ? (
-
-                <>
-
-                  <p className="max-w-full truncate font-medium">
-                    {resume.name}
-                  </p>
-
-                  <p className="mt-1 text-sm text-emerald-400">
-                    Resume uploaded
-                  </p>
-
-                </>
-
-              ) : (
-
-                <>
-
-                  <p className="font-medium">
-                    Drop your resume here
-                  </p>
-
-                  <p className="mt-2 text-sm text-slate-500">
-                    or click to browse
-                  </p>
-
-                </>
-
-              )}
-
-
-              <input
-                type="file"
-                accept=".pdf,.docx"
-                onChange={handleResumeChange}
-                className="hidden"
-              />
-
-            </label>
-
-
-            {resume && (
-
-              <div className="mt-4 flex items-center gap-2 text-sm text-emerald-400">
-
-                <CheckCircle2 size={16} />
-
-                Ready for analysis
-
-              </div>
-
-            )}
-
-          </div>
-
-
-          {/* JOB */}
-
-          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
-
-            <div className="mb-5 flex items-center gap-3">
-
-              <div className="rounded-xl bg-emerald-500/10 p-3 text-emerald-400">
-
-                <Briefcase size={20} />
-
-              </div>
-
-              <div>
-
-                <h3 className="font-semibold">
-                  Job Posting
-                </h3>
-
-                <p className="text-sm text-slate-500">
-                  URL or job description
-                </p>
-
-              </div>
-
-            </div>
-
-
-            <div className="relative">
-
-              <Link
-                size={17}
-                className="absolute left-4 top-3.5 text-slate-600"
-              />
-
-              <input
-                type="url"
-                value={jobUrl}
-                onChange={(event) =>
-                  setJobUrl(event.target.value)
-                }
-                placeholder="https://company.com/jobs/..."
-                className="w-full rounded-xl border border-slate-700 bg-slate-950 py-3 pl-11 pr-4 text-sm outline-none focus:border-violet-500"
-              />
-
-            </div>
-
-
-            <div className="my-4 flex items-center gap-3 text-sm text-slate-600">
-
-              <div className="h-px flex-1 bg-slate-800" />
-
-              OR
-
-              <div className="h-px flex-1 bg-slate-800" />
-
-            </div>
-
-
-            <textarea
-              value={jobDescription}
-              onChange={(event) =>
-                setJobDescription(
-                  event.target.value
-                )
-              }
-              placeholder="Paste the complete job description..."
-              rows={8}
-              className="w-full resize-none rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm outline-none focus:border-violet-500"
+          <label className="upload-box">
+            <input
+              type="file"
+              accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              onChange={handleResumeChange}
             />
 
-          </div>
-
-
-          {/* AI AGENT */}
-
-          <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-b from-violet-500/10 to-slate-900 p-6">
-
-            <div className="mb-5 flex items-center gap-3">
-
-              <div className="rounded-xl bg-violet-500/15 p-3 text-violet-400">
-
-                <Sparkles size={20} />
-
-              </div>
-
-              <div>
-
-                <h3 className="font-semibold">
-                  AI Agent
-                </h3>
-
-                <p className="text-sm text-slate-500">
-                  Application preparation
-                </p>
-
-              </div>
-
+            <div className="upload-icon">
+              ↑
             </div>
 
+            {resumeFile ? (
+              <>
+                <strong>{resumeFile.name}</strong>
 
-            <div className="space-y-3">
-
-              <AgentStep
-                icon={<FileText size={16} />}
-                text="Analyze job requirements"
-              />
-
-              <AgentStep
-                icon={<Briefcase size={16} />}
-                text="Compare your experience"
-              />
-
-              <AgentStep
-                icon={<Target size={16} />}
-                text="Identify skill gaps"
-              />
-
-              <AgentStep
-                icon={<Sparkles size={16} />}
-                text="Prepare application"
-              />
-
-            </div>
-
-
-            <button
-              onClick={handleAnalyze}
-              disabled={loading}
-              className="mt-7 flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-5 py-3.5 font-semibold transition hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-
-              {loading ? (
-
-                <>
-
-                  <Loader2
-                    size={18}
-                    className="animate-spin"
-                  />
-
-                  Analyzing...
-
-                </>
-
-              ) : (
-
-                <>
-
-                  Analyze Job
-
-                  <ArrowRight size={18} />
-
-                </>
-
-              )}
-
-            </button>
-
-          </div>
-
-        </div>
-
-
-        {/* =================================================
-            ANALYSIS
-        ================================================= */}
-
-        {analysis && (
-
-          <section
-            id="analysis-results"
-            className="mt-14"
-          >
-
-            <div className="mb-6">
-
-              <div className="mb-2 flex items-center gap-2 text-violet-400">
-
-                <Sparkles size={18} />
-
-                <span className="text-sm font-semibold">
-                  AI Analysis Complete
+                <span className="success-text">
+                  Resume uploaded
                 </span>
+              </>
+            ) : (
+              <>
+                <strong>
+                  Drop your resume here
+                </strong>
 
-              </div>
-
-              <h2 className="text-2xl font-bold">
-                Application Analysis
-              </h2>
-
-              <p className="mt-1 text-sm text-slate-500">
-                Here's how your profile compares with this role.
-              </p>
-
-            </div>
-
-
-            {/* SCORE */}
-
-            <div className="grid gap-6 md:grid-cols-3">
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
-
-                <p className="text-sm text-slate-500">
-                  Match Score
-                </p>
-
-                <div className="mt-3 flex items-end gap-2">
-
-                  <span className="text-5xl font-bold text-violet-400">
-                    {analysis.match_score ?? 0}
-                  </span>
-
-                  <span className="mb-2 text-slate-500">
-                    /100
-                  </span>
-
-                </div>
-
-                <p className="mt-3 text-sm font-medium text-violet-300">
-                  {getScoreLabel(
-                    analysis.match_score ?? 0
-                  )}
-                </p>
-
-              </div>
-
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
-
-                <p className="text-sm text-slate-500">
-                  Job Title
-                </p>
-
-                <h3 className="mt-3 text-xl font-semibold">
-                  {analysis.job_title ||
-                    "Job title not identified"}
-                </h3>
-
-              </div>
-
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
-
-                <p className="text-sm text-slate-500">
-                  Assessment
-                </p>
-
-                <p className="mt-3 text-sm leading-6 text-slate-300">
-                  {analysis.match_summary ||
-                    "No summary returned."}
-                </p>
-
-              </div>
-
-            </div>
-
-
-            {/* SKILLS */}
-
-            <div className="mt-6 grid gap-6 md:grid-cols-2">
-
-
-              <SkillCard
-                title="Matching Skills"
-                description="Skills supported by your resume"
-                items={analysis.matching_skills}
-                icon={
-                  <CheckCircle2 size={18} />
-                }
-                iconClass="text-emerald-400"
-              />
-
-
-              <SkillCard
-                title="Skill Gaps"
-                description="Requirements needing attention"
-                items={analysis.skill_gaps}
-                icon={
-                  <AlertCircle size={18} />
-                }
-                iconClass="text-orange-400"
-              />
-
-            </div>
-
-
-            {/* EXPERIENCE */}
-
-            {analysis.experience && (
-
-              <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-6">
-
-                <h3 className="font-semibold">
-                  Experience Match
-                </h3>
-
-                <p className="mt-1 text-sm text-slate-500">
-                  Comparison between the role and your background
-                </p>
-
-
-                <div className="mt-5 grid gap-4 md:grid-cols-3">
-
-                  <InfoCard
-                    title="Required"
-                    value={
-                      analysis.experience.required
-                    }
-                  />
-
-                  <InfoCard
-                    title="Candidate"
-                    value={
-                      analysis.experience.candidate
-                    }
-                  />
-
-                  <InfoCard
-                    title="Assessment"
-                    value={
-                      analysis.experience.assessment
-                    }
-                  />
-
-                </div>
-
-              </div>
-
+                <span>
+                  or click to upload
+                </span>
+              </>
             )}
+          </label>
 
+          {resumeFile && (
+            <div className="ready">
+              ✓ Ready for analysis
+            </div>
+          )}
+        </section>
 
-            {/* KEYWORDS */}
+        {/* JOB POSTING */}
+        <section className="card">
+          <div className="card-header">
+            <div className="icon green">💼</div>
 
-            {analysis.keywords?.length > 0 && (
+            <div>
+              <h2>Job Posting</h2>
+              <p>URL or job description</p>
+            </div>
+          </div>
 
-              <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-6">
+          <div className="input-wrapper">
+            <span>🔗</span>
 
-                <h3 className="mb-4 font-semibold">
-                  Important Keywords
-                </h3>
+            <input
+              type="url"
+              placeholder="https://company.com/jobs/..."
+              value={jobUrl}
+              onChange={(e) =>
+                setJobUrl(e.target.value)
+              }
+            />
+          </div>
 
-                <div className="flex flex-wrap gap-2">
+          <div className="or">
+            <span></span>
+            OR
+            <span></span>
+          </div>
 
-                  {analysis.keywords.map(
-                    (keyword, index) => (
+          <textarea
+            className="job-textarea"
+            placeholder="Paste the complete job description here..."
+            value={jobDescription}
+            onChange={(e) =>
+              setJobDescription(e.target.value)
+            }
+          />
+        </section>
 
-                      <span
-                        key={index}
-                        className="rounded-full border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-slate-300"
-                      >
-                        {keyword}
-                      </span>
+        {/* AI AGENT */}
+        <section className="card ai-card">
+          <div className="card-header">
+            <div className="icon purple">✣</div>
 
-                    )
-                  )}
+            <div>
+              <h2>AI Agent</h2>
+              <p>Application preparation</p>
+            </div>
+          </div>
 
-                </div>
-
-              </div>
-
-            )}
-
-
-            {/* =================================================
-                ACTIONS
-            ================================================= */}
-
-            <div className="mt-6 rounded-2xl border border-violet-500/20 bg-violet-500/5 p-6">
-
-              <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
-
-                <div>
-
-                  <h3 className="font-semibold">
-                    Prepare your application
-                  </h3>
-
-                  <p className="mt-1 text-sm text-slate-500">
-                    Tailor your resume and generate a personalized cover letter.
-                  </p>
-
-                </div>
-
-
-                <button
-                  onClick={handleTailorResume}
-                  disabled={tailoring}
-                  className="flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-5 py-3 text-sm font-semibold transition hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-
-                  {tailoring ? (
-
-                    <>
-
-                      <Loader2
-                        size={17}
-                        className="animate-spin"
-                      />
-
-                      Tailoring...
-
-                    </>
-
-                  ) : (
-
-                    <>
-
-                      Tailor My Resume
-
-                      <ArrowRight size={17} />
-
-                    </>
-
-                  )}
-
-                </button>
-
-              </div>
-
+          <div className="agent-actions">
+            <div className="agent-item">
+              📄 Analyze job requirements
             </div>
 
-          </section>
+            <div className="agent-item">
+              💼 Compare your experience
+            </div>
 
-        )}
+            <div className="agent-item">
+              🎯 Identify skill gaps
+            </div>
 
+            <div className="agent-item">
+              ✨ Prepare application
+            </div>
+          </div>
 
-        {/* =================================================
-            TAILORED RESUME
-        ================================================= */}
-
-        {tailoredResume && (
-
-          <section
-            id="tailored-resume"
-            className="mt-10 rounded-2xl border border-violet-500/20 bg-slate-900 p-6"
+          <button
+            className="primary-button"
+            onClick={handleAnalyze}
+            disabled={loading}
           >
-
-            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-
-              <div className="flex items-center gap-3">
-
-                <div className="rounded-xl bg-violet-500/10 p-3 text-violet-400">
-
-                  <FileText size={20} />
-
-                </div>
-
-                <div>
-
-                  <h2 className="text-2xl font-bold">
-                    Tailored Resume
-                  </h2>
-
-                  <p className="text-sm text-slate-500">
-                    Tailored for this specific job
-                  </p>
-
-                </div>
-
-              </div>
-
-
-              <button
-                onClick={handleDownloadResume}
-                disabled={downloadingResume}
-                className="flex items-center justify-center gap-2 rounded-xl border border-violet-500/30 bg-violet-500/10 px-5 py-3 text-sm font-semibold text-violet-300 transition hover:bg-violet-500/20 disabled:opacity-60"
-              >
-
-                {downloadingResume ? (
-
-                  <>
-
-                    <Loader2
-                      size={17}
-                      className="animate-spin"
-                    />
-
-                    Creating DOCX...
-
-                  </>
-
-                ) : (
-
-                  <>
-
-                    <Download size={17} />
-
-                    Download Resume
-
-                  </>
-
-                )}
-
-              </button>
-
-            </div>
-
-
-            <div className="mt-6 max-h-[700px] overflow-y-auto rounded-xl border border-slate-800 bg-slate-950 p-6">
-
-              <pre className="whitespace-pre-wrap font-sans text-sm leading-7 text-slate-300">
-
-                {tailoredResume}
-
-              </pre>
-
-            </div>
-
-
-            <div className="mt-5 flex items-center gap-2 text-sm text-emerald-400">
-
-              <CheckCircle2 size={17} />
-
-              Resume tailoring complete
-
-            </div>
-
-
-            {/* COVER LETTER ACTION */}
-
-            <div className="mt-6 rounded-xl border border-slate-800 bg-slate-950 p-5">
-
-              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-
-                <div className="flex items-center gap-3">
-
-                  <div className="rounded-lg bg-pink-500/10 p-2 text-pink-400">
-
-                    <Mail size={18} />
-
-                  </div>
-
-                  <div>
-
-                    <h3 className="font-semibold">
-                      Generate Cover Letter
-                    </h3>
-
-                    <p className="text-sm text-slate-500">
-                      Create a personalized letter for this role.
-                    </p>
-
-                  </div>
-
-                </div>
-
-
-                <button
-                  onClick={handleGenerateCoverLetter}
-                  disabled={generatingLetter}
-                  className="flex items-center justify-center gap-2 rounded-xl bg-pink-600 px-5 py-3 text-sm font-semibold transition hover:bg-pink-500 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-
-                  {generatingLetter ? (
-
-                    <>
-
-                      <Loader2
-                        size={17}
-                        className="animate-spin"
-                      />
-
-                      Generating...
-
-                    </>
-
-                  ) : (
-
-                    <>
-
-                      <Mail size={17} />
-
-                      Generate Cover Letter
-
-                    </>
-
-                  )}
-
-                </button>
-
-              </div>
-
-            </div>
-
-          </section>
-
-        )}
-
-
-        {/* =================================================
-            COVER LETTER
-        ================================================= */}
-
-        {coverLetter && (
-
-          <section
-            id="cover-letter"
-            className="mt-10 rounded-2xl border border-pink-500/20 bg-slate-900 p-6"
-          >
-
-            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-
-              <div className="flex items-center gap-3">
-
-                <div className="rounded-xl bg-pink-500/10 p-3 text-pink-400">
-
-                  <Mail size={20} />
-
-                </div>
-
-                <div>
-
-                  <h2 className="text-2xl font-bold">
-                    Cover Letter
-                  </h2>
-
-                  <p className="text-sm text-slate-500">
-                    Personalized for this job
-                  </p>
-
-                </div>
-
-              </div>
-
-
-              <button
-                onClick={handleDownloadCoverLetter}
-                disabled={downloadingLetter}
-                className="flex items-center justify-center gap-2 rounded-xl border border-pink-500/30 bg-pink-500/10 px-5 py-3 text-sm font-semibold text-pink-300 transition hover:bg-pink-500/20 disabled:opacity-60"
-              >
-
-                {downloadingLetter ? (
-
-                  <>
-
-                    <Loader2
-                      size={17}
-                      className="animate-spin"
-                    />
-
-                    Creating DOCX...
-
-                  </>
-
-                ) : (
-
-                  <>
-
-                    <Download size={17} />
-
-                    Download Cover Letter
-
-                  </>
-
-                )}
-
-              </button>
-
-            </div>
-
-
-            <div className="mt-6 rounded-xl border border-slate-800 bg-slate-950 p-6">
-
-              <div className="whitespace-pre-wrap text-sm leading-7 text-slate-300">
-
-                {coverLetter}
-
-              </div>
-
-            </div>
-
-
-            <div className="mt-5 flex items-center gap-2 text-sm text-emerald-400">
-
-              <CheckCircle2 size={17} />
-
-              Cover letter generated successfully
-
-            </div>
-
-          </section>
-
-        )}
-
-
+            {loading
+              ? "Analyzing..."
+              : "Analyze Job →"}
+          </button>
+        </section>
       </main>
 
-    </div>
+      {/* ANALYSIS */}
+      {analysis && (
+        <section className="results-section">
+          <div className="section-heading">
+            <div>
+              <span className="small-label">
+                AI ANALYSIS COMPLETE
+              </span>
 
-  );
-}
+              <h2>Application Analysis</h2>
 
+              <p>
+                Here's how your profile compares with this
+                role.
+              </p>
+            </div>
+          </div>
 
-// =========================================================
-// AGENT STEP
-// =========================================================
+          <div className="analysis-grid">
+            <div className="score-card">
+              <span>Match Score</span>
 
-function AgentStep({
-  icon,
-  text,
-}) {
+              <strong>
+                {matchScore !== null
+                  ? matchScore
+                  : "—"}
+              </strong>
 
-  return (
+              <small>/100</small>
+            </div>
 
-    <div className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/50 px-4 py-3">
+            <div className="info-card">
+              <span>Job Title</span>
 
-      <div className="text-violet-400">
-        {icon}
-      </div>
+              <h3>{jobTitle}</h3>
+            </div>
 
-      <span className="text-sm text-slate-300">
-        {text}
-      </span>
+            <div className="info-card">
+              <span>Assessment</span>
 
-    </div>
+              <p>
+                {assessment ||
+                  "Analysis completed successfully."}
+              </p>
+            </div>
+          </div>
 
-  );
-}
+          <div className="results-grid">
+            <div className="result-card">
+              <h3>✓ Matching Skills</h3>
 
+              <p className="result-description">
+                Skills supported by your resume
+              </p>
 
-// =========================================================
-// SKILL CARD
-// =========================================================
+              {renderList(matchingSkills)}
+            </div>
 
-function SkillCard({
-  title,
-  description,
-  items,
-  icon,
-  iconClass,
-}) {
+            <div className="result-card">
+              <h3>◎ Skill Gaps</h3>
 
-  return (
+              <p className="result-description">
+                Requirements needing attention
+              </p>
 
-    <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
+              {renderList(skillGaps)}
+            </div>
+          </div>
 
-      <div className="mb-5 flex items-center gap-3">
+          {experienceMatch && (
+            <div className="result-card full-width">
+              <h3>💼 Experience Match</h3>
 
-        <div className={`rounded-lg bg-slate-950 p-2 ${iconClass}`}>
-          {icon}
-        </div>
+              <p className="result-description">
+                Comparison between the role and your
+                background
+              </p>
 
-        <div>
+              {typeof experienceMatch === "string" ? (
+                <p>{experienceMatch}</p>
+              ) : (
+                <div className="experience-grid">
+                  {experienceMatch.required && (
+                    <div>
+                      <strong>Required</strong>
+                      <p>
+                        {experienceMatch.required}
+                      </p>
+                    </div>
+                  )}
 
-          <h3 className="font-semibold">
-            {title}
-          </h3>
+                  {experienceMatch.candidate && (
+                    <div>
+                      <strong>Candidate</strong>
+                      <p>
+                        {experienceMatch.candidate}
+                      </p>
+                    </div>
+                  )}
 
-          <p className="text-sm text-slate-500">
-            {description}
-          </p>
+                  {experienceMatch.assessment && (
+                    <div>
+                      <strong>Assessment</strong>
+                      <p>
+                        {experienceMatch.assessment}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
-        </div>
+          <div className="result-card full-width">
+            <h3>🔑 Important Keywords</h3>
 
-      </div>
+            <div className="keyword-container">
+              {Array.isArray(keywords) ? (
+                keywords.map((keyword, index) => (
+                  <span
+                    className="keyword"
+                    key={index}
+                  >
+                    {typeof keyword === "string"
+                      ? keyword
+                      : JSON.stringify(keyword)}
+                  </span>
+                ))
+              ) : (
+                <p>{keywords || "No keywords found."}</p>
+              )}
+            </div>
+          </div>
 
+          {/* APPLICATION ACTIONS */}
+          <div className="prepare-card">
+            <div>
+              <span className="small-label">
+                PREPARE YOUR APPLICATION
+              </span>
 
-      <div className="space-y-2">
+              <h2>
+                Tailor your resume and generate a
+                personalized cover letter.
+              </h2>
+            </div>
 
-        {items?.length > 0 ? (
-
-          items.map(
-            (item, index) => (
-
-              <div
-                key={index}
-                className="flex items-center gap-3 rounded-lg bg-slate-950 px-4 py-3"
+            <div className="prepare-buttons">
+              <button
+                className="secondary-button"
+                onClick={handleTailorResume}
+                disabled={tailoring}
               >
+                {tailoring
+                  ? "Tailoring Resume..."
+                  : "Tailor My Resume"}
+              </button>
 
-                <span className={iconClass}>
-                  {icon}
-                </span>
+              <button
+                className="primary-button"
+                onClick={handleGenerateCoverLetter}
+                disabled={generatingCoverLetter}
+              >
+                {generatingCoverLetter
+                  ? "Generating..."
+                  : "Generate Cover Letter"}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
 
-                <span className="text-sm text-slate-300">
+      {/* TAILORED RESUME */}
+      {tailoredResume && (
+        <section className="document-section">
+          <div className="document-header">
+            <div>
+              <span className="small-label">
+                TAILORED RESUME
+              </span>
 
-                  {typeof item === "object"
-                    ? item.skill ||
-                      item.name ||
-                      item.description ||
-                      JSON.stringify(item)
-                    : item}
+              <h2>
+                Tailored for this specific job
+              </h2>
+            </div>
 
-                </span>
+            <button
+              className="download-button"
+              onClick={handleDownloadResume}
+              disabled={resumeDownloading}
+            >
+              {resumeDownloading
+                ? "Preparing..."
+                : "↓ Download Resume"}
+            </button>
+          </div>
 
-              </div>
+          <div className="document-content">
+            <pre>{tailoredResume}</pre>
+          </div>
+        </section>
+      )}
 
-            )
-          )
+      {/* COVER LETTER */}
+      {coverLetter && (
+        <section className="document-section">
+          <div className="document-header">
+            <div>
+              <span className="small-label">
+                COVER LETTER
+              </span>
 
-        ) : (
+              <h2>
+                Personalized for this job
+              </h2>
+            </div>
 
-          <p className="text-sm text-slate-500">
-            None returned.
-          </p>
+            <button
+              className="download-button"
+              onClick={handleDownloadCoverLetter}
+              disabled={coverLetterDownloading}
+            >
+              {coverLetterDownloading
+                ? "Preparing..."
+                : "↓ Download Cover Letter"}
+            </button>
+          </div>
 
-        )}
+          <div className="cover-letter-content">
+            {coverLetter}
+          </div>
+        </section>
+      )}
 
-      </div>
+      <footer>
+        <p>
+          AI Job Application Agent · Built with React,
+          FastAPI & OpenAI
+        </p>
 
+        <p className="api-status">
+          Backend: {API_URL}
+        </p>
+      </footer>
     </div>
-
   );
 }
-
-
-// =========================================================
-// INFO CARD
-// =========================================================
-
-function InfoCard({
-  title,
-  value,
-}) {
-
-  return (
-
-    <div className="rounded-xl bg-slate-950 p-4">
-
-      <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
-        {title}
-      </p>
-
-      <p className="mt-2 text-sm leading-6 text-slate-300">
-        {value || "Not provided"}
-      </p>
-
-    </div>
-
-  );
-
-}
-
 
 export default App;
