@@ -49,13 +49,11 @@ FRONTEND_URL = os.getenv(
 
 MODEL_NAME = "gpt-5.6"
 
-
 if not OPENAI_API_KEY:
     raise RuntimeError(
         "OPENAI_API_KEY is not configured. "
         "Add it to the root .env file."
     )
-
 
 client = OpenAI(
     api_key=OPENAI_API_KEY
@@ -82,26 +80,37 @@ allowed_origins = [
     if origin.strip()
 ]
 
-if (
-    "http://localhost:5173"
-    not in allowed_origins
-):
-    allowed_origins.append(
-        "http://localhost:5173"
-    )
+# Local development
+allowed_origins.extend(
+    [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+)
 
-if (
-    "http://127.0.0.1:5173"
-    not in allowed_origins
-):
-    allowed_origins.append(
-        "http://127.0.0.1:5173"
+# Remove duplicates
+allowed_origins = list(
+    dict.fromkeys(
+        allowed_origins
     )
-
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+
+    # Allow the main Vercel production domain
+    # and future Vercel preview deployment domains.
+    #
+    # Examples:
+    # https://ai-job-application-agent-swart.vercel.app
+    # https://ai-job-application-agent-dkvdo3xdv-phaneendra-projects.vercel.app
+    allow_origin_regex=(
+        r"^https://ai-job-application-agent"
+        r"(?:-[a-zA-Z0-9-]+)?"
+        r"\.vercel\.app$"
+    ),
+
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -121,15 +130,24 @@ MAX_RESUME_FILE_SIZE = (
 # GENERAL HELPERS
 # =========================================================
 
-def clean_text(value: Any) -> str:
+def clean_text(
+    value: Any,
+) -> str:
+
     if value is None:
         return ""
 
     return str(value).strip()
 
 
-def safe_list(value: Any) -> List[Any]:
-    if isinstance(value, list):
+def safe_list(
+    value: Any,
+) -> List[Any]:
+
+    if isinstance(
+        value,
+        list,
+    ):
         return value
 
     return []
@@ -138,7 +156,11 @@ def safe_list(value: Any) -> List[Any]:
 def safe_dict(
     value: Any,
 ) -> Dict[str, Any]:
-    if isinstance(value, dict):
+
+    if isinstance(
+        value,
+        dict,
+    ):
         return value
 
     return {}
@@ -239,9 +261,14 @@ def extract_json_from_text(
     )
 
     try:
-        result = json.loads(cleaned)
+        result = json.loads(
+            cleaned
+        )
 
-        if isinstance(result, dict):
+        if isinstance(
+            result,
+            dict,
+        ):
             return result
 
     except json.JSONDecodeError:
@@ -256,7 +283,7 @@ def extract_json_from_text(
         and end > start
     ):
         candidate = cleaned[
-            start : end + 1
+            start:end + 1
         ]
 
         try:
@@ -264,7 +291,10 @@ def extract_json_from_text(
                 candidate
             )
 
-            if isinstance(result, dict):
+            if isinstance(
+                result,
+                dict,
+            ):
                 return result
 
         except json.JSONDecodeError:
@@ -285,9 +315,10 @@ def extract_pdf_text(
 
     try:
         reader = PdfReader(
-            io.BytesIO(file_bytes)
+            io.BytesIO(
+                file_bytes
+            )
         )
-
     except Exception as exc:
         raise ValueError(
             "Could not read the PDF resume."
@@ -298,8 +329,9 @@ def extract_pdf_text(
     for page in reader.pages:
 
         try:
-            page_text = page.extract_text()
-
+            page_text = (
+                page.extract_text()
+            )
         except Exception:
             page_text = None
 
@@ -319,9 +351,10 @@ def extract_docx_text(
 
     try:
         document = Document(
-            io.BytesIO(file_bytes)
+            io.BytesIO(
+                file_bytes
+            )
         )
-
     except Exception as exc:
         raise ValueError(
             "Could not read the DOCX resume."
@@ -357,7 +390,9 @@ def extract_docx_text(
 
             if cells:
                 text_parts.append(
-                    " | ".join(cells)
+                    " | ".join(
+                        cells
+                    )
                 )
 
     return "\n".join(
@@ -476,20 +511,6 @@ def extract_ashby_job_description(
     board_name = path_parts[0]
     posting_id = path_parts[1]
 
-    if not board_name:
-        raise ValueError(
-            "Could not determine the Ashby "
-            "job board."
-        )
-
-    if not posting_id:
-        raise ValueError(
-            "Could not determine the Ashby "
-            "posting ID."
-        )
-
-    # IMPORTANT:
-    # This is Ashby's official public API.
     api_url = (
         "https://api.ashbyhq.com/"
         "posting-api/job-board/"
@@ -575,10 +596,9 @@ def extract_ashby_job_description(
 
     matched_job = None
 
-    # =====================================================
-    # MATCH 1
-    # Posting ID appears in URL
-    # =====================================================
+    # -----------------------------------------------------
+    # Match 1: posting ID in job/apply URL
+    # -----------------------------------------------------
 
     for job in jobs:
 
@@ -609,10 +629,9 @@ def extract_ashby_job_description(
             matched_job = job
             break
 
-    # =====================================================
-    # MATCH 2
-    # Compare URL paths
-    # =====================================================
+    # -----------------------------------------------------
+    # Match 2: normalized URL
+    # -----------------------------------------------------
 
     if matched_job is None:
 
@@ -630,16 +649,10 @@ def extract_ashby_job_description(
             ):
                 continue
 
-            candidates = [
-                job.get(
-                    "applyUrl"
-                ),
-                job.get(
-                    "jobUrl"
-                ),
-            ]
-
-            for candidate in candidates:
+            for candidate in [
+                job.get("applyUrl"),
+                job.get("jobUrl"),
+            ]:
 
                 if not candidate:
                     continue
@@ -660,60 +673,6 @@ def extract_ashby_job_description(
             if matched_job:
                 break
 
-    # =====================================================
-    # MATCH 3
-    # Compare the job path slug
-    # =====================================================
-
-    if matched_job is None:
-
-        input_last_part = (
-            path_parts[-1]
-            .lower()
-        )
-
-        for job in jobs:
-
-            if not isinstance(
-                job,
-                dict,
-            ):
-                continue
-
-            for candidate in [
-                job.get("applyUrl"),
-                job.get("jobUrl"),
-            ]:
-
-                if not candidate:
-                    continue
-
-                candidate_parts = [
-                    part
-                    for part in urlparse(
-                        str(candidate)
-                    ).path.split("/")
-                    if part
-                ]
-
-                if not candidate_parts:
-                    continue
-
-                candidate_last_part = (
-                    candidate_parts[-1]
-                    .lower()
-                )
-
-                if (
-                    candidate_last_part
-                    == input_last_part
-                ):
-                    matched_job = job
-                    break
-
-            if matched_job:
-                break
-
     if matched_job is None:
         raise ValueError(
             "The Ashby job posting could not "
@@ -721,10 +680,6 @@ def extract_ashby_job_description(
             "The job may have been removed or "
             "the URL may have changed."
         )
-
-    # =====================================================
-    # DESCRIPTION
-    # =====================================================
 
     description = clean_text(
         matched_job.get(
@@ -742,7 +697,6 @@ def extract_ashby_job_description(
         )
 
     if not description:
-
         raise ValueError(
             "The Ashby posting was found, "
             "but it does not contain a "
@@ -766,16 +720,6 @@ def extract_ashby_job_description(
                 "applyUrl"
             )
         ),
-        "location": clean_text(
-            matched_job.get(
-                "location"
-            )
-        ),
-        "workplace_type": clean_text(
-            matched_job.get(
-                "workplaceType"
-            )
-        ),
     }
 
 
@@ -796,18 +740,17 @@ def resolve_job_description(
         job_url
     )
 
-    # User pasted a job description.
+    # Manual description has priority.
     if job_description:
 
         return {
-            "job_description": (
-                job_description
-            ),
+            "job_description":
+                job_description,
             "job_title": "",
             "source_url": job_url,
         }
 
-    # User supplied a URL.
+    # Otherwise use URL.
     if job_url:
 
         parsed = urlparse(
@@ -827,14 +770,15 @@ def resolve_job_description(
             )
 
             return {
-                "job_description": (
-                    result["description"]
-                ),
-                "job_title": result.get(
-                    "job_title",
-                    "",
-                ),
-                "source_url": job_url,
+                "job_description":
+                    result["description"],
+                "job_title":
+                    result.get(
+                        "job_title",
+                        "",
+                    ),
+                "source_url":
+                    job_url,
             }
 
         raise ValueError(
@@ -851,7 +795,7 @@ def resolve_job_description(
 
 
 # =========================================================
-# AI JOB ANALYSIS
+# AI ANALYSIS
 # =========================================================
 
 def analyze_application(
@@ -865,26 +809,25 @@ You are an expert technical recruiter.
 Compare the candidate resume against the
 specific job description.
 
-IMPORTANT RULES:
+Be objective and factual.
 
-- Be objective and factual.
-- Do not invent candidate experience.
-- Do not assume missing information means
-  the candidate lacks a skill.
-- Distinguish "not specified" from "not required".
-- Only identify a candidate skill when the resume
-  provides evidence.
-- Only identify a job requirement when it is actually
-  stated or clearly required.
-- Ignore website navigation.
-- Ignore unrelated job advertisements.
-- Ignore unrelated vacancies.
-- Ignore recruitment marketing.
-- Ignore generic footer content.
+Never invent candidate experience.
+
+Do not assume missing information means
+the candidate lacks a skill.
+
+Distinguish "not specified" from
+"not required".
+
+Only identify a candidate skill when
+the resume provides evidence.
+
+Only identify a requirement when it is
+stated or clearly required.
 
 Return ONLY valid JSON.
 
-Use exactly this structure:
+Use exactly:
 
 {
   "job_title": "",
@@ -906,13 +849,7 @@ Use exactly this structure:
   "keywords": []
 }
 
-Rules:
-
-- match_score must be an integer from 0 to 100.
-- Do not exaggerate the score.
-- matching_skills must be an array of concise strings.
-- skill_gaps must be an array of concise strings.
-- keywords must be an array of concise strings.
+match_score must be 0-100.
 
 match_level must be one of:
 
@@ -940,10 +877,6 @@ CANDIDATE RESUME:
     result = extract_json_from_text(
         response.output_text
     )
-
-    # =====================================================
-    # NORMALIZE RESULT
-    # =====================================================
 
     result["job_title"] = clean_text(
         result.get(
@@ -1120,16 +1053,6 @@ def normalize_resume(
         ),
     }
 
-    # =====================================================
-    # SKILLS
-    # =====================================================
-
-    raw_skills = safe_dict(
-        resume.get(
-            "skills"
-        )
-    )
-
     categories = [
         "Programming",
         "AI / LLM",
@@ -1138,6 +1061,12 @@ def normalize_resume(
         "Databases / Infrastructure",
         "Testing / Delivery",
     ]
+
+    raw_skills = safe_dict(
+        resume.get(
+            "skills"
+        )
+    )
 
     normalized_skills = {}
 
@@ -1168,15 +1097,15 @@ def normalize_resume(
             if clean_text(item)
         ]
 
-    normalized["skills"] = (
-        normalized_skills
-    )
+    normalized[
+        "skills"
+    ] = normalized_skills
 
-    # =====================================================
     # EXPERIENCE
-    # =====================================================
 
-    normalized["experience"] = []
+    normalized[
+        "experience"
+    ] = []
 
     for item in safe_list(
         resume.get(
@@ -1188,47 +1117,51 @@ def normalize_resume(
             item
         )
 
-        bullets = [
-            clean_text(bullet)
-            for bullet in safe_list(
-                item.get(
-                    "bullets"
-                )
-            )
-            if clean_text(bullet)
-        ]
-
-        normalized["experience"].append(
+        normalized[
+            "experience"
+        ].append(
             {
-                "title": clean_text(
-                    item.get(
-                        "title"
+                "title":
+                    clean_text(
+                        item.get(
+                            "title"
+                        )
+                    ),
+                "company":
+                    clean_text(
+                        item.get(
+                            "company"
+                        )
+                    ),
+                "location":
+                    clean_text(
+                        item.get(
+                            "location"
+                        )
+                    ),
+                "dates":
+                    clean_text(
+                        item.get(
+                            "dates"
+                        )
+                    ),
+                "bullets": [
+                    clean_text(bullet)
+                    for bullet in safe_list(
+                        item.get(
+                            "bullets"
+                        )
                     )
-                ),
-                "company": clean_text(
-                    item.get(
-                        "company"
-                    )
-                ),
-                "location": clean_text(
-                    item.get(
-                        "location"
-                    )
-                ),
-                "dates": clean_text(
-                    item.get(
-                        "dates"
-                    )
-                ),
-                "bullets": bullets,
+                    if clean_text(bullet)
+                ],
             }
         )
 
-    # =====================================================
     # PROJECTS
-    # =====================================================
 
-    normalized["projects"] = []
+    normalized[
+        "projects"
+    ] = []
 
     for item in safe_list(
         resume.get(
@@ -1240,43 +1173,42 @@ def normalize_resume(
             item
         )
 
-        technologies = [
-            clean_text(tech)
-            for tech in safe_list(
-                item.get(
-                    "technologies"
-                )
-            )
-            if clean_text(tech)
-        ]
-
-        bullets = [
-            clean_text(bullet)
-            for bullet in safe_list(
-                item.get(
-                    "bullets"
-                )
-            )
-            if clean_text(bullet)
-        ]
-
-        normalized["projects"].append(
+        normalized[
+            "projects"
+        ].append(
             {
-                "title": clean_text(
-                    item.get(
-                        "title"
+                "title":
+                    clean_text(
+                        item.get(
+                            "title"
+                        )
+                    ),
+                "technologies": [
+                    clean_text(tech)
+                    for tech in safe_list(
+                        item.get(
+                            "technologies"
+                        )
                     )
-                ),
-                "technologies": technologies,
-                "bullets": bullets,
+                    if clean_text(tech)
+                ],
+                "bullets": [
+                    clean_text(bullet)
+                    for bullet in safe_list(
+                        item.get(
+                            "bullets"
+                        )
+                    )
+                    if clean_text(bullet)
+                ],
             }
         )
 
-    # =====================================================
     # EDUCATION
-    # =====================================================
 
-    normalized["education"] = []
+    normalized[
+        "education"
+    ] = []
 
     for item in safe_list(
         resume.get(
@@ -1288,28 +1220,34 @@ def normalize_resume(
             item
         )
 
-        normalized["education"].append(
+        normalized[
+            "education"
+        ].append(
             {
-                "degree": clean_text(
-                    item.get(
-                        "degree"
-                    )
-                ),
-                "institution": clean_text(
-                    item.get(
-                        "institution"
-                    )
-                ),
-                "location": clean_text(
-                    item.get(
-                        "location"
-                    )
-                ),
-                "dates": clean_text(
-                    item.get(
-                        "dates"
-                    )
-                ),
+                "degree":
+                    clean_text(
+                        item.get(
+                            "degree"
+                        )
+                    ),
+                "institution":
+                    clean_text(
+                        item.get(
+                            "institution"
+                        )
+                    ),
+                "location":
+                    clean_text(
+                        item.get(
+                            "location"
+                        )
+                    ),
+                "dates":
+                    clean_text(
+                        item.get(
+                            "dates"
+                        )
+                    ),
             }
         )
 
@@ -1317,7 +1255,7 @@ def normalize_resume(
 
 
 # =========================================================
-# AI RESUME TAILORING
+# TAILOR RESUME
 # =========================================================
 
 def tailor_resume(
@@ -1328,9 +1266,10 @@ def tailor_resume(
     instructions = """
 You are an expert ATS resume writer.
 
-Create a truthful, job-targeted resume.
+Create a truthful job-targeted resume.
 
-Use ONLY facts supported by the original resume.
+Use ONLY facts supported by the
+original resume.
 
 NEVER invent:
 
@@ -1347,12 +1286,12 @@ NEVER invent:
 - production experience
 - cloud platforms
 
-You MAY:
+You may:
 
-- rewrite wording
+- improve wording
 - improve clarity
 - reorder information
-- improve bullet points
+- strengthen bullets
 - prioritize relevant existing skills
 - prioritize relevant existing projects
 - improve the summary
@@ -1360,7 +1299,7 @@ You MAY:
 
 Return ONLY valid JSON.
 
-Use exactly this structure:
+Use exactly:
 
 {
   "name": "",
@@ -1408,14 +1347,10 @@ Use exactly this structure:
   ]
 }
 
-Formatting rules:
-
-- No markdown.
-- No # symbols.
-- No ** symbols.
-- No bullet symbols inside bullet strings.
-- Keep content concise.
-- Preserve actual facts.
+No markdown.
+No # symbols.
+No ** symbols.
+No bullet symbols inside strings.
 """
 
     response = client.responses.create(
@@ -1452,11 +1387,14 @@ def generate_cover_letter(
 ) -> str:
 
     instructions = """
-You are an expert professional cover letter writer.
+You are an expert professional
+cover letter writer.
 
-Write a concise, personalized cover letter.
+Write a concise personalized
+cover letter for the specific job.
 
-Use only information supported by the resume.
+Use only information supported
+by the candidate resume.
 
 Never invent:
 
@@ -1464,25 +1402,22 @@ Never invent:
 - technologies
 - achievements
 - metrics
-- certifications
 - education
+- certifications
 
 Rules:
 
-- Professional tone.
-- Tailor to the specific job.
-- Mention genuine relevant experience.
-- Do not copy the job posting.
-- Do not mention AI.
-- No markdown.
-- No bullets.
-- Use normal paragraphs.
-- Approximately 350–500 words.
-- Finish with:
+- professional tone
+- personalized
+- no markdown
+- no bullets
+- normal paragraphs
+- approximately 350-500 words
+- finish with:
 
 Kind regards,
 
-Candidate Name
+Phaneendra Gunji
 """
 
     response = client.responses.create(
@@ -1512,6 +1447,7 @@ CANDIDATE RESUME:
 def add_bottom_border(
     paragraph,
 ):
+
     p = paragraph._p
 
     pPr = p.get_or_add_pPr()
@@ -1602,7 +1538,6 @@ def setup_document(
     )
 
     normal.font.bold = False
-
     normal.font.italic = False
 
     normal.paragraph_format.space_before = Pt(
@@ -1702,7 +1637,6 @@ def add_bullet(
     )
 
     text_run.bold = False
-
     text_run.italic = False
 
     return paragraph
@@ -1726,9 +1660,9 @@ def build_resume_docx(
         document
     )
 
-    # =====================================================
+    # -----------------------------------------------------
     # HEADER
-    # =====================================================
+    # -----------------------------------------------------
 
     paragraph = document.add_paragraph()
 
@@ -1765,9 +1699,7 @@ def build_resume_docx(
 
     if location:
 
-        paragraph = (
-            document.add_paragraph()
-        )
+        paragraph = document.add_paragraph()
 
         paragraph.alignment = (
             WD_ALIGN_PARAGRAPH.CENTER
@@ -1808,9 +1740,7 @@ def build_resume_docx(
 
     if contacts:
 
-        paragraph = (
-            document.add_paragraph()
-        )
+        paragraph = document.add_paragraph()
 
         paragraph.alignment = (
             WD_ALIGN_PARAGRAPH.CENTER
@@ -1842,9 +1772,7 @@ def build_resume_docx(
 
     if authorization:
 
-        paragraph = (
-            document.add_paragraph()
-        )
+        paragraph = document.add_paragraph()
 
         paragraph.alignment = (
             WD_ALIGN_PARAGRAPH.CENTER
@@ -1866,9 +1794,9 @@ def build_resume_docx(
             9
         )
 
-    # =====================================================
+    # -----------------------------------------------------
     # SUMMARY
-    # =====================================================
+    # -----------------------------------------------------
 
     summary = clean_text(
         resume.get(
@@ -1883,9 +1811,7 @@ def build_resume_docx(
             "Professional Summary",
         )
 
-        paragraph = (
-            document.add_paragraph()
-        )
+        paragraph = document.add_paragraph()
 
         paragraph.paragraph_format.space_after = Pt(
             4
@@ -1904,10 +1830,11 @@ def build_resume_docx(
         )
 
         run.bold = False
+        run.italic = False
 
-    # =====================================================
+    # -----------------------------------------------------
     # SKILLS
-    # =====================================================
+    # -----------------------------------------------------
 
     skills = safe_dict(
         resume.get(
@@ -1929,9 +1856,7 @@ def build_resume_docx(
             if not values:
                 continue
 
-            paragraph = (
-                document.add_paragraph()
-            )
+            paragraph = document.add_paragraph()
 
             paragraph.paragraph_format.space_after = Pt(
                 2
@@ -1967,9 +1892,9 @@ def build_resume_docx(
 
             run.bold = False
 
-    # =====================================================
+    # -----------------------------------------------------
     # EXPERIENCE
-    # =====================================================
+    # -----------------------------------------------------
 
     experience = safe_list(
         resume.get(
@@ -1986,28 +1911,24 @@ def build_resume_docx(
 
         for job in experience:
 
-            title_paragraph = (
-                document.add_paragraph()
-            )
+            paragraph = document.add_paragraph()
 
-            title_paragraph.paragraph_format.space_before = Pt(
+            paragraph.paragraph_format.space_before = Pt(
                 3
             )
 
-            title_paragraph.paragraph_format.space_after = Pt(
+            paragraph.paragraph_format.space_after = Pt(
                 1
             )
 
-            title_paragraph.paragraph_format.tab_stops.add_tab_stop(
+            paragraph.paragraph_format.tab_stops.add_tab_stop(
                 Inches(6.85)
             )
 
-            title_run = (
-                title_paragraph.add_run(
-                    clean_text(
-                        job.get(
-                            "title"
-                        )
+            title_run = paragraph.add_run(
+                clean_text(
+                    job.get(
+                        "title"
                     )
                 )
             )
@@ -2030,10 +1951,8 @@ def build_resume_docx(
 
             if dates:
 
-                date_run = (
-                    title_paragraph.add_run(
-                        "\t" + dates
-                    )
+                date_run = paragraph.add_run(
+                    "\t" + dates
                 )
 
                 date_run.font.name = (
@@ -2072,9 +1991,7 @@ def build_resume_docx(
 
             if company_parts:
 
-                paragraph = (
-                    document.add_paragraph()
-                )
+                paragraph = document.add_paragraph()
 
                 paragraph.paragraph_format.space_after = Pt(
                     2
@@ -2109,9 +2026,9 @@ def build_resume_docx(
                         bullet,
                     )
 
-    # =====================================================
+    # -----------------------------------------------------
     # PROJECTS
-    # =====================================================
+    # -----------------------------------------------------
 
     projects = safe_list(
         resume.get(
@@ -2128,9 +2045,7 @@ def build_resume_docx(
 
         for project in projects:
 
-            paragraph = (
-                document.add_paragraph()
-            )
+            paragraph = document.add_paragraph()
 
             paragraph.paragraph_format.space_before = Pt(
                 3
@@ -2159,20 +2074,18 @@ def build_resume_docx(
             run.bold = True
 
             technologies = [
-                clean_text(item)
-                for item in safe_list(
+                clean_text(tech)
+                for tech in safe_list(
                     project.get(
                         "technologies"
                     )
                 )
-                if clean_text(item)
+                if clean_text(tech)
             ]
 
             if technologies:
 
-                paragraph = (
-                    document.add_paragraph()
-                )
+                paragraph = document.add_paragraph()
 
                 paragraph.paragraph_format.space_after = Pt(
                     2
@@ -2208,9 +2121,9 @@ def build_resume_docx(
                         bullet,
                     )
 
-    # =====================================================
+    # -----------------------------------------------------
     # EDUCATION
-    # =====================================================
+    # -----------------------------------------------------
 
     education = safe_list(
         resume.get(
@@ -2227,9 +2140,7 @@ def build_resume_docx(
 
         for item in education:
 
-            paragraph = (
-                document.add_paragraph()
-            )
+            paragraph = document.add_paragraph()
 
             paragraph.paragraph_format.space_before = Pt(
                 2
@@ -2243,12 +2154,10 @@ def build_resume_docx(
                 Inches(6.85)
             )
 
-            degree_run = (
-                paragraph.add_run(
-                    clean_text(
-                        item.get(
-                            "degree"
-                        )
+            degree_run = paragraph.add_run(
+                clean_text(
+                    item.get(
+                        "degree"
                     )
                 )
             )
@@ -2311,9 +2220,7 @@ def build_resume_docx(
 
             if institution_parts:
 
-                paragraph = (
-                    document.add_paragraph()
-                )
+                paragraph = document.add_paragraph()
 
                 paragraph.paragraph_format.space_after = Pt(
                     2
@@ -2397,9 +2304,7 @@ def build_cover_letter_docx(
         if not paragraph_text:
             continue
 
-        paragraph = (
-            document.add_paragraph()
-        )
+        paragraph = document.add_paragraph()
 
         paragraph.paragraph_format.space_after = Pt(
             10
@@ -2438,7 +2343,6 @@ def build_cover_letter_docx(
 class TailorResumeRequest(
     BaseModel
 ):
-
     resume_text: str = Field(
         default=""
     )
@@ -2455,7 +2359,6 @@ class TailorResumeRequest(
 class CoverLetterRequest(
     BaseModel
 ):
-
     resume_text: str = Field(
         default=""
     )
@@ -2472,7 +2375,6 @@ class CoverLetterRequest(
 class DownloadResumeRequest(
     BaseModel
 ):
-
     tailored_resume: Optional[
         Dict[str, Any]
     ] = None
@@ -2485,7 +2387,6 @@ class DownloadResumeRequest(
 class DownloadCoverLetterRequest(
     BaseModel
 ):
-
     cover_letter: str = Field(
         default=""
     )
@@ -2520,7 +2421,7 @@ def health():
 
 
 # =========================================================
-# ANALYZE JOB
+# ANALYZE
 # =========================================================
 
 @app.post("/analyze")
@@ -2537,19 +2438,11 @@ async def analyze_job(
     ),
 ):
 
-    # -----------------------------------------------------
-    # Resume
-    # -----------------------------------------------------
-
     resume_text = (
         await extract_resume_text(
             resume
         )
     )
-
-    # -----------------------------------------------------
-    # Job description
-    # -----------------------------------------------------
 
     try:
 
@@ -2573,11 +2466,9 @@ async def analyze_job(
         ]
     )
 
-    detected_job_title = (
-        clean_text(
-            resolved_job.get(
-                "job_title"
-            )
+    detected_job_title = clean_text(
+        resolved_job.get(
+            "job_title"
         )
     )
 
@@ -2586,10 +2477,6 @@ async def analyze_job(
             "source_url"
         )
     )
-
-    # -----------------------------------------------------
-    # AI
-    # -----------------------------------------------------
 
     try:
 
@@ -2634,7 +2521,7 @@ async def analyze_job(
 
 
 # =========================================================
-# TAILOR RESUME
+# TAILOR
 # =========================================================
 
 @app.post("/tailor")
@@ -2680,9 +2567,8 @@ async def tailor_job_resume(
         ) from exc
 
     return {
-        "tailored_resume": (
+        "tailored_resume":
             tailored_resume
-        )
     }
 
 
@@ -2734,7 +2620,8 @@ async def create_cover_letter(
         ) from exc
 
     return {
-        "cover_letter": cover_letter
+        "cover_letter":
+            cover_letter
     }
 
 
@@ -2751,7 +2638,6 @@ async def download_resume(
         request.tailored_resume
     )
 
-    # Compatibility with older frontend.
     if not resume_data:
 
         if not request.tailored_resume_text:
