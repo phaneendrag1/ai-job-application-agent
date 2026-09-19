@@ -1,2 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
 
+# Virtual environments
+.venv/
+.venv-1/
+venv/
+env/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+frontend/dist/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local files
+uploads/
+tmp/
+
+# Secrets
+*.pem
+*.key
+
+# Old nested project
 job_application_agent/
