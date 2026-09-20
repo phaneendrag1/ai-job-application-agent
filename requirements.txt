@@ -1,7 +1,9 @@
 fastapi
 uvicorn[standard]
 python-multipart
+python-dotenv
 openai
+requests
 pypdf
 python-docx
-python-dotenv
+pydantic
