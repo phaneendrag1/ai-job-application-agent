@@ -1,45 +1,51 @@
+from __future__ import annotations
+
 import io
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from pathlib import Path
+from typing import Any
 
+import requests
 from dotenv import load_dotenv
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 from openai import OpenAI
-from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
+from backend.ats import build_ats_audit
 
-# =========================================================
-# PATHS / ENVIRONMENT
-# =========================================================
 
-PROJECT_ROOT = os.path.dirname(
-    os.path.dirname(
-        os.path.abspath(__file__)
-    )
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+PROJECT_ROOT = (
+    Path(__file__)
+    .resolve()
+    .parents[1]
 )
 
 load_dotenv(
-    os.path.join(
-        PROJECT_ROOT,
-        ".env",
-    )
+    PROJECT_ROOT / ".env"
 )
 
 OPENAI_API_KEY = os.getenv(
-    "OPENAI_API_KEY"
+    "OPENAI_API_KEY",
+    "",
 )
 
 FRONTEND_URL = os.getenv(
@@ -47,32 +53,27 @@ FRONTEND_URL = os.getenv(
     "http://localhost:5173",
 )
 
-MODEL_NAME = "gpt-5.6"
-
 if not OPENAI_API_KEY:
+
     raise RuntimeError(
-        "OPENAI_API_KEY is not configured. "
-        "Add it to the root .env file."
+        "OPENAI_API_KEY is not configured."
     )
 
 client = OpenAI(
-    api_key=OPENAI_API_KEY
+    api_key=OPENAI_API_KEY,
+    timeout=90.0,
+    max_retries=0,
 )
 
 
-# =========================================================
+# ============================================================
 # FASTAPI
-# =========================================================
+# ============================================================
 
 app = FastAPI(
-    title="AI Job Application Agent API",
-    version="1.0.0",
+    title="JobPilot AI",
+    version="6.0.0",
 )
-
-
-# =========================================================
-# CORS
-# =========================================================
 
 allowed_origins = [
     origin.strip()
@@ -80,7 +81,6 @@ allowed_origins = [
     if origin.strip()
 ]
 
-# Local development
 allowed_origins.extend(
     [
         "http://localhost:5173",
@@ -88,7 +88,6 @@ allowed_origins.extend(
     ]
 )
 
-# Remove duplicates
 allowed_origins = list(
     dict.fromkeys(
         allowed_origins
@@ -98,204 +97,271 @@ allowed_origins = list(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-
-    # Allow the main Vercel production domain
-    # and future Vercel preview deployment domains.
-    #
-    # Examples:
-    # https://ai-job-application-agent-swart.vercel.app
-    # https://ai-job-application-agent-dkvdo3xdv-phaneendra-projects.vercel.app
     allow_origin_regex=(
         r"^https://ai-job-application-agent"
         r"(?:-[a-zA-Z0-9-]+)?"
         r"\.vercel\.app$"
     ),
-
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# =========================================================
-# CONSTANTS
-# =========================================================
+# ============================================================
+# BASIC ENDPOINTS
+# ============================================================
 
-MAX_RESUME_FILE_SIZE = (
-    10 * 1024 * 1024
-)
+@app.get("/")
+def root():
 
-
-# =========================================================
-# GENERAL HELPERS
-# =========================================================
-
-def clean_text(
-    value: Any,
-) -> str:
-
-    if value is None:
-        return ""
-
-    return str(value).strip()
+    return {
+        "name": "JobPilot AI",
+        "status": "online",
+        "version": "6.0.0",
+    }
 
 
-def safe_list(
-    value: Any,
-) -> List[Any]:
+@app.get("/health")
+def health():
 
-    if isinstance(
-        value,
-        list,
-    ):
-        return value
-
-    return []
+    return {
+        "status": "healthy",
+        "service": "JobPilot AI",
+        "version": "6.0.0",
+    }
 
 
-def safe_dict(
-    value: Any,
-) -> Dict[str, Any]:
+# ============================================================
+# FILE VALIDATION
+# ============================================================
 
-    if isinstance(
-        value,
-        dict,
-    ):
-        return value
+async def read_upload(
+    file: UploadFile,
+) -> bytes:
 
-    return {}
+    if not file.filename:
 
-
-def strip_html(
-    html: str,
-) -> str:
-
-    if not html:
-        return ""
-
-    text = html
-
-    text = re.sub(
-        r"<br\s*/?>",
-        "\n",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    text = re.sub(
-        r"</p\s*>",
-        "\n\n",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    text = re.sub(
-        r"</div\s*>",
-        "\n",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    text = re.sub(
-        r"</li\s*>",
-        "\n",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    text = re.sub(
-        r"<[^>]+>",
-        " ",
-        text,
-    )
-
-    text = re.sub(
-        r"[ \t]+",
-        " ",
-        text,
-    )
-
-    text = re.sub(
-        r"\n[ \t]+",
-        "\n",
-        text,
-    )
-
-    text = re.sub(
-        r"\n\s*\n\s*\n+",
-        "\n\n",
-        text,
-    )
-
-    return text.strip()
-
-
-def extract_json_from_text(
-    text: str,
-) -> Dict[str, Any]:
-
-    if not text:
-        raise ValueError(
-            "The AI returned an empty response."
+        raise HTTPException(
+            status_code=400,
+            detail="A resume file is required.",
         )
 
-    cleaned = text.strip()
+    extension = Path(
+        file.filename
+    ).suffix.lower()
 
-    cleaned = re.sub(
-        r"^```json\s*",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
+    if extension not in {
+        ".pdf",
+        ".docx",
+    }:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only PDF and DOCX files are supported."
+            ),
+        )
+
+    data = await file.read()
+
+    if not data:
+
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded resume is empty.",
+        )
+
+    if len(data) > (
+        8 * 1024 * 1024
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Resume must be smaller than 8 MB."
+            ),
+        )
+
+    return data
+
+
+# ============================================================
+# RESUME EXTRACTION
+# ============================================================
+
+def extract_pdf_text(
+    data: bytes,
+) -> str:
+
+    reader = PdfReader(
+        io.BytesIO(data)
     )
 
-    cleaned = re.sub(
-        r"^```\s*",
-        "",
-        cleaned,
+    pages = []
+
+    for page in reader.pages:
+
+        text = (
+            page.extract_text()
+            or ""
+        ).strip()
+
+        if text:
+            pages.append(
+                text
+            )
+
+    return "\n".join(
+        pages
+    ).strip()
+
+
+def extract_docx_text(
+    data: bytes,
+) -> str:
+
+    document = Document(
+        io.BytesIO(data)
     )
 
-    cleaned = re.sub(
-        r"\s*```$",
-        "",
-        cleaned,
+    parts = []
+
+    for paragraph in document.paragraphs:
+
+        text = (
+            paragraph.text
+            or ""
+        ).strip()
+
+        if text:
+            parts.append(
+                text
+            )
+
+    for table in document.tables:
+
+        for row in table.rows:
+
+            for cell in row.cells:
+
+                text = (
+                    cell.text
+                    or ""
+                ).strip()
+
+                if text:
+                    parts.append(
+                        text
+                    )
+
+    return "\n".join(
+        parts
+    ).strip()
+
+
+def extract_resume_text(
+    filename: str,
+    data: bytes,
+) -> str:
+
+    extension = Path(
+        filename
+    ).suffix.lower()
+
+    if extension == ".pdf":
+
+        text = extract_pdf_text(
+            data
+        )
+
+    elif extension == ".docx":
+
+        text = extract_docx_text(
+            data
+        )
+
+    else:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported resume format.",
+        )
+
+    if not text:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No readable text was found in the resume."
+            ),
+        )
+
+    return text
+
+
+# ============================================================
+# OPENAI JSON
+# ============================================================
+
+def parse_json_response(
+    raw: str,
+) -> dict[str, Any]:
+
+    text = (
+        raw
+        .strip()
+        .replace(
+            "```json",
+            "",
+        )
+        .replace(
+            "```",
+            "",
+        )
+        .strip()
     )
 
     try:
-        result = json.loads(
-            cleaned
+
+        parsed = json.loads(
+            text
         )
 
         if isinstance(
-            result,
+            parsed,
             dict,
         ):
-            return result
+
+            return parsed
 
     except json.JSONDecodeError:
         pass
 
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
+    start = text.find("{")
+    end = text.rfind("}")
 
     if (
-        start != -1
-        and end != -1
+        start >= 0
         and end > start
     ):
-        candidate = cleaned[
+
+        candidate = text[
             start:end + 1
         ]
 
         try:
-            result = json.loads(
+
+            parsed = json.loads(
                 candidate
             )
 
             if isinstance(
-                result,
+                parsed,
                 dict,
             ):
-                return result
+
+                return parsed
 
         except json.JSONDecodeError:
             pass
@@ -305,1020 +371,62 @@ def extract_json_from_text(
     )
 
 
-# =========================================================
-# RESUME EXTRACTION
-# =========================================================
-
-def extract_pdf_text(
-    file_bytes: bytes,
-) -> str:
-
-    try:
-        reader = PdfReader(
-            io.BytesIO(
-                file_bytes
-            )
-        )
-    except Exception as exc:
-        raise ValueError(
-            "Could not read the PDF resume."
-        ) from exc
-
-    text_parts = []
-
-    for page in reader.pages:
-
-        try:
-            page_text = (
-                page.extract_text()
-            )
-        except Exception:
-            page_text = None
-
-        if page_text:
-            text_parts.append(
-                page_text
-            )
-
-    return "\n".join(
-        text_parts
-    ).strip()
-
-
-def extract_docx_text(
-    file_bytes: bytes,
-) -> str:
-
-    try:
-        document = Document(
-            io.BytesIO(
-                file_bytes
-            )
-        )
-    except Exception as exc:
-        raise ValueError(
-            "Could not read the DOCX resume."
-        ) from exc
-
-    text_parts = []
-
-    for paragraph in document.paragraphs:
-
-        text = paragraph.text.strip()
-
-        if text:
-            text_parts.append(
-                text
-            )
-
-    for table in document.tables:
-
-        for row in table.rows:
-
-            cells = []
-
-            for cell in row.cells:
-
-                cell_text = (
-                    cell.text.strip()
-                )
-
-                if cell_text:
-                    cells.append(
-                        cell_text
-                    )
-
-            if cells:
-                text_parts.append(
-                    " | ".join(
-                        cells
-                    )
-                )
-
-    return "\n".join(
-        text_parts
-    ).strip()
-
-
-async def extract_resume_text(
-    resume: UploadFile,
-) -> str:
-
-    filename = (
-        resume.filename or ""
-    ).lower()
-
-    if not (
-        filename.endswith(".pdf")
-        or filename.endswith(".docx")
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Only PDF and DOCX resumes "
-                "are supported."
-            ),
-        )
-
-    file_bytes = await resume.read()
-
-    if not file_bytes:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "The uploaded resume is empty."
-            ),
-        )
-
-    if (
-        len(file_bytes)
-        > MAX_RESUME_FILE_SIZE
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "The resume is too large. "
-                "Maximum size is 10 MB."
-            ),
-        )
-
-    if filename.endswith(".pdf"):
-
-        text = extract_pdf_text(
-            file_bytes
-        )
-
-    else:
-
-        text = extract_docx_text(
-            file_bytes
-        )
-
-    if not text.strip():
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No readable text was found "
-                "in the uploaded resume."
-            ),
-        )
-
-    return text
-
-
-# =========================================================
-# ASHBY JOB URL EXTRACTION
-# =========================================================
-
-def extract_ashby_job_description(
-    job_url: str,
-) -> Dict[str, Any]:
-
-    job_url = clean_text(
-        job_url
-    )
-
-    if not job_url:
-        raise ValueError(
-            "The job URL is empty."
-        )
-
-    parsed = urlparse(
-        job_url
-    )
-
-    hostname = (
-        parsed.hostname or ""
-    ).lower()
-
-    if hostname != "jobs.ashbyhq.com":
-        raise ValueError(
-            "Automatic extraction currently "
-            "supports Ashby job URLs only."
-        )
-
-    path_parts = [
-        part
-        for part in parsed.path.split("/")
-        if part
-    ]
-
-    if len(path_parts) < 2:
-        raise ValueError(
-            "The Ashby job URL format is invalid."
-        )
-
-    board_name = path_parts[0]
-    posting_id = path_parts[1]
-
-    api_url = (
-        "https://api.ashbyhq.com/"
-        "posting-api/job-board/"
-        f"{board_name}"
-    )
-
-    request = Request(
-        api_url,
-        headers={
-            "User-Agent": (
-                "AI-Job-Application-Agent/1.0"
-            ),
-            "Accept": "application/json",
-        },
-        method="GET",
-    )
-
-    try:
-
-        with urlopen(
-            request,
-            timeout=20,
-        ) as response:
-
-            raw_body = response.read()
-
-    except HTTPError as exc:
-
-        raise ValueError(
-            "Ashby returned HTTP "
-            f"{exc.code} while retrieving "
-            "the job board."
-        ) from exc
-
-    except URLError as exc:
-
-        raise ValueError(
-            "Could not connect to Ashby's "
-            "job posting service."
-        ) from exc
-
-    except Exception as exc:
-
-        raise ValueError(
-            "Could not retrieve the Ashby "
-            "job posting."
-        ) from exc
-
-    try:
-
-        data = json.loads(
-            raw_body.decode(
-                "utf-8"
-            )
-        )
-
-    except Exception as exc:
-
-        raise ValueError(
-            "Ashby returned invalid job "
-            "posting data."
-        ) from exc
-
-    jobs = data.get(
-        "jobs",
-        [],
-    )
-
-    if not isinstance(
-        jobs,
-        list,
-    ):
-        raise ValueError(
-            "Ashby returned an unexpected "
-            "job posting format."
-        )
-
-    if not jobs:
-        raise ValueError(
-            "No published jobs were found "
-            "for this Ashby job board."
-        )
-
-    matched_job = None
-
-    # -----------------------------------------------------
-    # Match 1: posting ID in job/apply URL
-    # -----------------------------------------------------
-
-    for job in jobs:
-
-        if not isinstance(
-            job,
-            dict,
-        ):
-            continue
-
-        apply_url = clean_text(
-            job.get(
-                "applyUrl"
-            )
-        )
-
-        job_page_url = clean_text(
-            job.get(
-                "jobUrl"
-            )
-        )
-
-        if (
-            posting_id.lower()
-            in apply_url.lower()
-            or posting_id.lower()
-            in job_page_url.lower()
-        ):
-            matched_job = job
-            break
-
-    # -----------------------------------------------------
-    # Match 2: normalized URL
-    # -----------------------------------------------------
-
-    if matched_job is None:
-
-        normalized_input = (
-            job_url
-            .rstrip("/")
-            .lower()
-        )
-
-        for job in jobs:
-
-            if not isinstance(
-                job,
-                dict,
-            ):
-                continue
-
-            for candidate in [
-                job.get("applyUrl"),
-                job.get("jobUrl"),
-            ]:
-
-                if not candidate:
-                    continue
-
-                normalized_candidate = (
-                    str(candidate)
-                    .rstrip("/")
-                    .lower()
-                )
-
-                if (
-                    normalized_input
-                    == normalized_candidate
-                ):
-                    matched_job = job
-                    break
-
-            if matched_job:
-                break
-
-    if matched_job is None:
-        raise ValueError(
-            "The Ashby job posting could not "
-            "be matched to a published posting. "
-            "The job may have been removed or "
-            "the URL may have changed."
-        )
-
-    description = clean_text(
-        matched_job.get(
-            "descriptionPlain"
-        )
-    )
-
-    if not description:
-
-        description = strip_html(
-            matched_job.get(
-                "descriptionHtml",
-                "",
-            )
-        )
-
-    if not description:
-        raise ValueError(
-            "The Ashby posting was found, "
-            "but it does not contain a "
-            "readable job description."
-        )
-
-    return {
-        "job_title": clean_text(
-            matched_job.get(
-                "title"
-            )
-        ),
-        "description": description,
-        "job_url": clean_text(
-            matched_job.get(
-                "jobUrl"
-            )
-        ),
-        "apply_url": clean_text(
-            matched_job.get(
-                "applyUrl"
-            )
-        ),
-    }
-
-
-# =========================================================
-# JOB DESCRIPTION RESOLUTION
-# =========================================================
-
-def resolve_job_description(
-    job_description: str,
-    job_url: str,
-) -> Dict[str, str]:
-
-    job_description = clean_text(
-        job_description
-    )
-
-    job_url = clean_text(
-        job_url
-    )
-
-    # Manual description has priority.
-    if job_description:
-
-        return {
-            "job_description":
-                job_description,
-            "job_title": "",
-            "source_url": job_url,
-        }
-
-    # Otherwise use URL.
-    if job_url:
-
-        parsed = urlparse(
-            job_url
-        )
-
-        hostname = (
-            parsed.hostname or ""
-        ).lower()
-
-        if hostname == "jobs.ashbyhq.com":
-
-            result = (
-                extract_ashby_job_description(
-                    job_url
-                )
-            )
-
-            return {
-                "job_description":
-                    result["description"],
-                "job_title":
-                    result.get(
-                        "job_title",
-                        "",
-                    ),
-                "source_url":
-                    job_url,
-            }
-
-        raise ValueError(
-            "Automatic extraction currently "
-            "supports Ashby job URLs only. "
-            "Please paste the job description "
-            "for another job board."
-        )
-
-    raise ValueError(
-        "Please provide a job description "
-        "or a supported job URL."
-    )
-
-
-# =========================================================
-# AI ANALYSIS
-# =========================================================
-
-def analyze_application(
-    job_description: str,
-    resume_text: str,
-) -> Dict[str, Any]:
-
-    instructions = """
-You are an expert technical recruiter.
-
-Compare the candidate resume against the
-specific job description.
-
-Be objective and factual.
-
-Never invent candidate experience.
-
-Do not assume missing information means
-the candidate lacks a skill.
-
-Distinguish "not specified" from
-"not required".
-
-Only identify a candidate skill when
-the resume provides evidence.
-
-Only identify a requirement when it is
-stated or clearly required.
-
-Return ONLY valid JSON.
-
-Use exactly:
-
-{
-  "job_title": "",
-  "match_score": 0,
-  "match_level": "",
-  "summary": "",
-  "matching_skills": [],
-  "skill_gaps": [],
-  "experience": {
-    "required": "",
-    "candidate": "",
-    "assessment": ""
-  },
-  "education": {
-    "required": "",
-    "candidate": "",
-    "assessment": ""
-  },
-  "keywords": []
-}
-
-match_score must be 0-100.
-
-match_level must be one of:
-
-Strong Match
-Moderate Match
-Limited Match
-Poor Match
-"""
+def call_json_model(
+    instructions: str,
+    user_input: str,
+) -> dict[str, Any]:
 
     response = client.responses.create(
-        model=MODEL_NAME,
+        model="gpt-5.6",
         instructions=instructions,
-        input=f"""
-JOB DESCRIPTION:
-
-{job_description}
-
-
-CANDIDATE RESUME:
-
-{resume_text}
-""",
+        input=user_input,
     )
 
-    result = extract_json_from_text(
+    return parse_json_response(
         response.output_text
     )
 
-    result["job_title"] = clean_text(
-        result.get(
-            "job_title",
-            "",
-        )
-    )
 
-    try:
+# ============================================================
+# RESUME STRUCTURING
+# ============================================================
 
-        result["match_score"] = int(
-            result.get(
-                "match_score",
-                0,
-            )
-        )
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-
-        result["match_score"] = 0
-
-    result["match_score"] = max(
-        0,
-        min(
-            100,
-            result["match_score"],
-        ),
-    )
-
-    result["match_level"] = clean_text(
-        result.get(
-            "match_level",
-            "",
-        )
-    )
-
-    result["summary"] = clean_text(
-        result.get(
-            "summary",
-            "",
-        )
-    )
-
-    result["matching_skills"] = [
-        clean_text(item)
-        for item in safe_list(
-            result.get(
-                "matching_skills",
-                [],
-            )
-        )
-        if clean_text(item)
-    ]
-
-    result["skill_gaps"] = [
-        clean_text(item)
-        for item in safe_list(
-            result.get(
-                "skill_gaps",
-                [],
-            )
-        )
-        if clean_text(item)
-    ]
-
-    result["keywords"] = [
-        clean_text(item)
-        for item in safe_list(
-            result.get(
-                "keywords",
-                [],
-            )
-        )
-        if clean_text(item)
-    ]
-
-    experience = safe_dict(
-        result.get(
-            "experience",
-            {},
-        )
-    )
-
-    result["experience"] = {
-        "required": clean_text(
-            experience.get(
-                "required",
-                "Not specified",
-            )
-        ),
-        "candidate": clean_text(
-            experience.get(
-                "candidate",
-                "Not specified",
-            )
-        ),
-        "assessment": clean_text(
-            experience.get(
-                "assessment",
-                "Not specified",
-            )
-        ),
-    }
-
-    education = safe_dict(
-        result.get(
-            "education",
-            {},
-        )
-    )
-
-    result["education"] = {
-        "required": clean_text(
-            education.get(
-                "required",
-                "Not specified",
-            )
-        ),
-        "candidate": clean_text(
-            education.get(
-                "candidate",
-                "Not specified",
-            )
-        ),
-        "assessment": clean_text(
-            education.get(
-                "assessment",
-                "Not specified",
-            )
-        ),
-    }
-
-    return result
-
-
-# =========================================================
-# RESUME NORMALIZATION
-# =========================================================
-
-def normalize_resume(
-    resume: Dict[str, Any],
-) -> Dict[str, Any]:
-
-    resume = safe_dict(
-        resume
-    )
-
-    normalized = {
-        "name": clean_text(
-            resume.get("name")
-        ),
-        "location": clean_text(
-            resume.get("location")
-        ),
-        "email": clean_text(
-            resume.get("email")
-        ),
-        "phone": clean_text(
-            resume.get("phone")
-        ),
-        "linkedin": clean_text(
-            resume.get("linkedin")
-        ),
-        "authorization": clean_text(
-            resume.get(
-                "authorization"
-            )
-        ),
-        "summary": clean_text(
-            resume.get("summary")
-        ),
-    }
-
-    categories = [
-        "Programming",
-        "AI / LLM",
-        "Machine Learning",
-        "Backend / APIs",
-        "Databases / Infrastructure",
-        "Testing / Delivery",
-    ]
-
-    raw_skills = safe_dict(
-        resume.get(
-            "skills"
-        )
-    )
-
-    normalized_skills = {}
-
-    for category in categories:
-
-        values = raw_skills.get(
-            category,
-            [],
-        )
-
-        if isinstance(
-            values,
-            str,
-        ):
-            values = [
-                item.strip()
-                for item in values.split(",")
-                if item.strip()
-            ]
-
-        normalized_skills[
-            category
-        ] = [
-            clean_text(item)
-            for item in safe_list(
-                values
-            )
-            if clean_text(item)
-        ]
-
-    normalized[
-        "skills"
-    ] = normalized_skills
-
-    # EXPERIENCE
-
-    normalized[
-        "experience"
-    ] = []
-
-    for item in safe_list(
-        resume.get(
-            "experience"
-        )
-    ):
-
-        item = safe_dict(
-            item
-        )
-
-        normalized[
-            "experience"
-        ].append(
-            {
-                "title":
-                    clean_text(
-                        item.get(
-                            "title"
-                        )
-                    ),
-                "company":
-                    clean_text(
-                        item.get(
-                            "company"
-                        )
-                    ),
-                "location":
-                    clean_text(
-                        item.get(
-                            "location"
-                        )
-                    ),
-                "dates":
-                    clean_text(
-                        item.get(
-                            "dates"
-                        )
-                    ),
-                "bullets": [
-                    clean_text(bullet)
-                    for bullet in safe_list(
-                        item.get(
-                            "bullets"
-                        )
-                    )
-                    if clean_text(bullet)
-                ],
-            }
-        )
-
-    # PROJECTS
-
-    normalized[
-        "projects"
-    ] = []
-
-    for item in safe_list(
-        resume.get(
-            "projects"
-        )
-    ):
-
-        item = safe_dict(
-            item
-        )
-
-        normalized[
-            "projects"
-        ].append(
-            {
-                "title":
-                    clean_text(
-                        item.get(
-                            "title"
-                        )
-                    ),
-                "technologies": [
-                    clean_text(tech)
-                    for tech in safe_list(
-                        item.get(
-                            "technologies"
-                        )
-                    )
-                    if clean_text(tech)
-                ],
-                "bullets": [
-                    clean_text(bullet)
-                    for bullet in safe_list(
-                        item.get(
-                            "bullets"
-                        )
-                    )
-                    if clean_text(bullet)
-                ],
-            }
-        )
-
-    # EDUCATION
-
-    normalized[
-        "education"
-    ] = []
-
-    for item in safe_list(
-        resume.get(
-            "education"
-        )
-    ):
-
-        item = safe_dict(
-            item
-        )
-
-        normalized[
-            "education"
-        ].append(
-            {
-                "degree":
-                    clean_text(
-                        item.get(
-                            "degree"
-                        )
-                    ),
-                "institution":
-                    clean_text(
-                        item.get(
-                            "institution"
-                        )
-                    ),
-                "location":
-                    clean_text(
-                        item.get(
-                            "location"
-                        )
-                    ),
-                "dates":
-                    clean_text(
-                        item.get(
-                            "dates"
-                        )
-                    ),
-            }
-        )
-
-    return normalized
-
-
-# =========================================================
-# TAILOR RESUME
-# =========================================================
-
-def tailor_resume(
-    job_description: str,
+def structure_resume(
     resume_text: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 
     instructions = """
-You are an expert ATS resume writer.
+You are an expert resume parser.
 
-Create a truthful job-targeted resume.
+Convert the resume into structured JSON.
 
-Use ONLY facts supported by the
-original resume.
+IMPORTANT:
+Do not invent facts.
 
-NEVER invent:
-
+Preserve the candidate's actual:
+- name
+- contact information
+- summary
+- skills
 - employers
-- job titles
-- technologies
-- certifications
+- titles
+- dates
 - projects
 - education
-- dates
-- metrics
+- certifications
 - achievements
-- responsibilities
-- production experience
-- cloud platforms
 
-You may:
-
-- improve wording
-- improve clarity
-- reorder information
-- strengthen bullets
-- prioritize relevant existing skills
-- prioritize relevant existing projects
-- improve the summary
-- remove irrelevant information
-
-Return ONLY valid JSON.
-
-Use exactly:
+Return ONLY valid JSON:
 
 {
   "name": "",
-  "location": "",
   "email": "",
   "phone": "",
+  "location": "",
   "linkedin": "",
-  "authorization": "",
+  "github": "",
   "summary": "",
-
-  "skills": {
-    "Programming": [],
-    "AI / LLM": [],
-    "Machine Learning": [],
-    "Backend / APIs": [],
-    "Databases / Infrastructure": [],
-    "Testing / Delivery": []
-  },
-
+  "skills": [],
   "experience": [
     {
       "title": "",
@@ -1328,15 +436,14 @@ Use exactly:
       "bullets": []
     }
   ],
-
   "projects": [
     {
-      "title": "",
+      "name": "",
       "technologies": [],
+      "description": "",
       "bullets": []
     }
   ],
-
   "education": [
     {
       "degree": "",
@@ -1344,127 +451,1079 @@ Use exactly:
       "location": "",
       "dates": ""
     }
-  ]
+  ],
+  "certifications": []
 }
-
-No markdown.
-No # symbols.
-No ** symbols.
-No bullet symbols inside strings.
 """
 
-    response = client.responses.create(
-        model=MODEL_NAME,
-        instructions=instructions,
-        input=f"""
-JOB DESCRIPTION:
-
-{job_description}
-
-
-ORIGINAL RESUME:
-
-{resume_text}
-""",
-    )
-
-    result = extract_json_from_text(
-        response.output_text
-    )
-
-    return normalize_resume(
-        result
+    return call_json_model(
+        instructions,
+        resume_text,
     )
 
 
-# =========================================================
-# COVER LETTER
-# =========================================================
+# ============================================================
+# ASHBY
+# ============================================================
 
-def generate_cover_letter(
-    job_description: str,
-    resume_text: str,
+def extract_ashby_job(
+    ashby_url: str,
 ) -> str:
 
+    url = ashby_url.strip()
+
+    match = re.match(
+        r"^https?://jobs\.ashbyhq\.com/"
+        r"([^/?#]+)"
+        r"(?:/([^/?#]+))?",
+        url,
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Please provide a valid Ashby job URL."
+            ),
+        )
+
+    board_name = match.group(1)
+    posting_id = match.group(2)
+
+    api_url = (
+        "https://api.ashbyhq.com/"
+        f"posting-api/job-board/{board_name}"
+    )
+
+    try:
+
+        response = requests.get(
+            api_url,
+            timeout=20,
+        )
+
+        response.raise_for_status()
+
+        payload = response.json()
+
+    except requests.RequestException as exc:
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Unable to retrieve the Ashby job posting."
+            ),
+        ) from exc
+
+    jobs = (
+        payload.get(
+            "jobs"
+        )
+        or []
+    )
+
+    if not jobs:
+
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No public jobs were found "
+                "for this Ashby board."
+            ),
+        )
+
+    selected = None
+
+    if posting_id:
+
+        for job in jobs:
+
+            job_id = str(
+                job.get(
+                    "id"
+                )
+                or ""
+            )
+
+            job_url = str(
+                job.get(
+                    "jobUrl"
+                )
+                or ""
+            )
+
+            if (
+                job_id.lower()
+                == posting_id.lower()
+            ):
+
+                selected = job
+                break
+
+            if (
+                posting_id.lower()
+                in job_url.lower()
+            ):
+
+                selected = job
+                break
+
+    if selected is None:
+
+        selected = jobs[0]
+
+    title = (
+        selected.get(
+            "title"
+        )
+        or ""
+    )
+
+    description = (
+        selected.get(
+            "descriptionPlain"
+        )
+        or selected.get(
+            "description"
+        )
+        or ""
+    )
+
+    if not description:
+
+        description = json.dumps(
+            selected,
+            indent=2,
+        )
+
+    return (
+        f"Job Title: {title}\n\n"
+        f"{description}"
+    ).strip()
+
+
+# ============================================================
+# JOB RESOLUTION
+# ============================================================
+
+def resolve_job_description(
+    job_description: str,
+    ashby_url: str,
+) -> str:
+
+    jd = (
+        job_description
+        or ""
+    ).strip()
+
+    ashby = (
+        ashby_url
+        or ""
+    ).strip()
+
+    if jd:
+        return jd
+
+    if ashby:
+        return extract_ashby_job(
+            ashby
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Add a job description or Ashby URL."
+        ),
+    )
+
+
+# ============================================================
+# JOB INTELLIGENCE
+# ============================================================
+
+def extract_job_intelligence(
+    job_description: str,
+) -> dict[str, Any]:
+
     instructions = """
-You are an expert professional
-cover letter writer.
+You are an expert technical recruiter and ATS analyst.
 
-Write a concise personalized
-cover letter for the specific job.
+Analyze ONE specific job posting.
 
-Use only information supported
-by the candidate resume.
+Your job is to identify meaningful requirements that
+should be used for resume matching.
 
-Never invent:
+IGNORE:
+- privacy notices
+- EEO statements
+- legal text
+- benefits
+- footer text
+- navigation
+- company boilerplate
+- generic wording
+- repeated phrases
+- unrelated jobs
 
-- work experience
-- technologies
-- achievements
-- metrics
-- education
-- certifications
+IMPORTANT:
+Do NOT split one technical concept into tiny words.
 
-Rules:
+BAD:
+[
+  "database",
+  "systems",
+  "replication",
+  "debugging"
+]
 
-- professional tone
-- personalized
-- no markdown
-- no bullets
-- normal paragraphs
-- approximately 350-500 words
-- finish with:
+GOOD:
+[
+  "database replication",
+  "production debugging"
+]
 
-Kind regards,
+Only include meaningful requirements.
 
-Phaneendra Gunji
+HARD SKILLS:
+Include actual technologies, programming languages,
+databases, frameworks, cloud services, debugging
+tools, testing systems, security technologies,
+infrastructure, and similar technical requirements.
+
+SOFT SKILLS:
+Include actual behavioral requirements such as
+collaboration, communication, ownership,
+troubleshooting, reliability, customer focus,
+problem solving, and knowledge sharing.
+
+EXPERIENCE:
+Include meaningful experience requirements.
+Do not copy complete responsibility sentences.
+
+KEYWORDS:
+Choose important searchable phrases that matter
+for ATS matching.
+
+KEEP LISTS COMPACT:
+
+hard_skills:
+8-18 items
+
+soft_skills:
+4-10 items
+
+experience_requirements:
+3-8 items
+
+keywords:
+10-25 items
+
+Avoid duplicates and overlapping items.
+
+Compound technical concepts should stay together.
+
+Examples:
+
+"database replication engines"
+is one requirement.
+
+"security vulnerability remediation"
+is one requirement.
+
+"multi-region production services"
+is one requirement.
+
+Return ONLY JSON:
+
+{
+  "job_title": "",
+  "hard_skills": [],
+  "soft_skills": [],
+  "responsibilities": [],
+  "experience_requirements": [],
+  "education_requirements": [],
+  "keywords": []
+}
 """
 
-    response = client.responses.create(
-        model=MODEL_NAME,
-        instructions=instructions,
-        input=f"""
-JOB DESCRIPTION:
-
-{job_description}
-
-
-CANDIDATE RESUME:
-
-{resume_text}
-""",
-    )
-
-    return clean_text(
-        response.output_text
+    return call_json_model(
+        instructions,
+        job_description,
     )
 
 
-# =========================================================
+# ============================================================
+# JOB ANALYSIS
+# ============================================================
+
+def analyze_resume_against_job(
+    resume_text: str,
+    job_description: str,
+    job_intelligence: dict[str, Any],
+) -> dict[str, Any]:
+
+    instructions = """
+You are an expert technical recruiter.
+
+Compare the candidate resume with the target role.
+
+Never invent candidate experience.
+
+Clearly distinguish:
+- evidence in the resume
+- missing requirements
+- requirements that the job does not specify
+
+Return ONLY JSON:
+
+{
+  "summary": "",
+  "matching_skills": [],
+  "skill_gaps": [],
+  "experience_comparison": "",
+  "education_comparison": "",
+  "recommendations": [],
+  "resume_issues": []
+}
+"""
+
+    payload = {
+        "resume":
+            resume_text,
+
+        "job_description":
+            job_description,
+
+        "job_intelligence":
+            job_intelligence,
+    }
+
+    return call_json_model(
+        instructions,
+        json.dumps(
+            payload,
+            indent=2,
+        ),
+    )
+
+
+# ============================================================
+# TARGET TITLE
+# ============================================================
+
+def ensure_target_title_in_summary(
+    resume: dict[str, Any],
+    target_job_title: str,
+) -> dict[str, Any]:
+
+    target = (
+        target_job_title
+        or ""
+    ).strip()
+
+    if not target:
+        return resume
+
+    summary = (
+        resume.get(
+            "summary"
+        )
+        or ""
+    ).strip()
+
+    if not summary:
+
+        resume["summary"] = (
+            "Software engineer targeting "
+            f"{target} opportunities."
+        )
+
+        return resume
+
+    normalized_summary = (
+        summary.lower()
+    )
+
+    normalized_target = (
+        target.lower()
+    )
+
+    short_title = ""
+
+    if (
+        "software development engineer ii"
+        in normalized_target
+    ):
+
+        short_title = "sde2"
+
+    elif (
+        "software development engineer 2"
+        in normalized_target
+    ):
+
+        short_title = "sde2"
+
+    if (
+        normalized_target
+        in normalized_summary
+    ):
+
+        return resume
+
+    if (
+        short_title
+        and short_title
+        in normalized_summary
+    ):
+
+        return resume
+
+    resume["summary"] = (
+        f"{summary} "
+        f"Targeting {target} opportunities."
+    ).strip()
+
+    return resume
+
+
+# ============================================================
+# TAILORING
+# ============================================================
+
+def tailor_resume_with_ai(
+    resume_text: str,
+    job_description: str,
+    job_intelligence: dict[str, Any],
+    original_resume: dict[str, Any],
+    current_ats: dict[str, Any],
+) -> dict[str, Any]:
+
+    missing_hard_skills = (
+        current_ats.get(
+            "missing_hard_skills"
+        )
+        or []
+    )
+
+    missing_soft_skills = (
+        current_ats.get(
+            "missing_soft_skills"
+        )
+        or []
+    )
+
+    missing_keywords = (
+        current_ats.get(
+            "missing_keywords"
+        )
+        or []
+    )
+
+    target_title = (
+        job_intelligence.get(
+            "job_title"
+        )
+        or ""
+    ).strip()
+
+    instructions = f"""
+You are an elite ATS resume optimization specialist.
+
+TARGET JOB:
+{target_title}
+
+OBJECTIVE:
+Create the strongest truthful ATS-aligned version of
+the candidate's resume for this specific role.
+
+============================================================
+ABSOLUTE TRUTH RULE
+============================================================
+
+NEVER invent:
+
+- technologies
+- databases
+- programming languages
+- employers
+- positions held
+- dates
+- projects
+- certifications
+- education
+- metrics
+- production experience
+- responsibilities
+- achievements
+
+Use only information supported by the original resume.
+
+============================================================
+TITLE VISIBILITY
+============================================================
+
+The exact target job title should appear naturally in
+the professional summary.
+
+If the candidate never held that title, do not represent
+it as a previous job.
+
+Use language such as:
+
+"Software engineer with experience in X, targeting
+Software Development Engineer II (SDE2) opportunities."
+
+============================================================
+SKILL PRESERVATION
+============================================================
+
+Preserve all relevant technical skills already present.
+
+Translate equivalent terminology naturally.
+
+Examples:
+
+AWS
+Amazon Web Services
+
+C++
+C/C++
+
+PostgreSQL
+Postgres
+
+SQL Server
+MSSQL
+
+CI/CD
+Continuous Integration / Continuous Delivery
+
+Do not add a skill simply because it appears in the job.
+
+============================================================
+MISSING HARD SKILLS
+============================================================
+
+"""
+
+    instructions += "\n".join(
+        f"- {item}"
+        for item in missing_hard_skills[:30]
+    )
+
+    instructions += """
+
+============================================================
+MISSING SOFT SKILLS
+============================================================
+
+"""
+
+    instructions += "\n".join(
+        f"- {item}"
+        for item in missing_soft_skills[:20]
+    )
+
+    instructions += """
+
+============================================================
+MISSING KEYWORDS
+============================================================
+
+"""
+
+    instructions += "\n".join(
+        f"- {item}"
+        for item in missing_keywords[:40]
+    )
+
+    instructions += """
+
+============================================================
+MEASURABLE RESULTS
+============================================================
+
+Look for REAL measurable achievements in the original resume.
+
+Use existing:
+- percentages
+- counts
+- scale
+- latency
+- time savings
+- performance improvements
+- cost savings
+- throughput
+- users
+- records
+- deployments
+- defect reductions
+
+Do NOT invent metrics.
+
+Make genuine existing measurements easy to identify.
+
+============================================================
+WRITING
+============================================================
+
+Use concise, evidence-based bullets.
+
+Prefer:
+
+Action + technology/process + result
+
+Do not keyword stuff.
+
+Do not make the resume unnaturally repetitive.
+
+Keep all employers, titles, dates, education, and projects
+accurate.
+
+============================================================
+RETURN JSON ONLY
+============================================================
+
+{
+  "name": "",
+  "email": "",
+  "phone": "",
+  "location": "",
+  "linkedin": "",
+  "github": "",
+  "summary": "",
+  "skills": [],
+  "experience": [
+    {
+      "title": "",
+      "company": "",
+      "location": "",
+      "dates": "",
+      "bullets": []
+    }
+  ],
+  "projects": [
+    {
+      "name": "",
+      "technologies": [],
+      "description": "",
+      "bullets": []
+    }
+  ],
+  "education": [
+    {
+      "degree": "",
+      "institution": "",
+      "location": "",
+      "dates": ""
+    }
+  ],
+  "certifications": []
+}
+"""
+
+    payload = {
+        "target_job_title":
+            target_title,
+
+        "job_description":
+            job_description,
+
+        "job_intelligence":
+            job_intelligence,
+
+        "current_ats":
+            current_ats,
+
+        "original_resume":
+            original_resume,
+
+        "original_resume_text":
+            resume_text,
+    }
+
+    return call_json_model(
+        instructions,
+        json.dumps(
+            payload,
+            indent=2,
+        ),
+    )
+
+
+# ============================================================
+# FINAL RESUME QUALITY CONTROL
+# ============================================================
+
+def repair_resume_for_jobscan(
+    resume: dict[str, Any],
+    original_resume: dict[str, Any],
+    job_description: str,
+    job_intelligence: dict[str, Any],
+    ats: dict[str, Any],
+) -> dict[str, Any]:
+
+    target_title = (
+        job_intelligence.get(
+            "job_title"
+        )
+        or ""
+    ).strip()
+
+    instructions = f"""
+You are performing a final ATS resume quality-control pass.
+
+TARGET TITLE:
+{target_title}
+
+Improve ATS searchability and job alignment.
+
+STRICT:
+Only use facts from the original resume.
+
+Do NOT invent:
+- technology
+- employer
+- job title held
+- dates
+- projects
+- metrics
+- responsibilities
+- certifications
+- education
+- achievements
+
+CHECK:
+
+1. Target title is visible naturally in the summary.
+2. Existing relevant technical skills are preserved.
+3. Supported job terminology is visible.
+4. Important job-relevant skills are easy to find.
+5. Existing measurable achievements remain visible.
+6. Employers remain unchanged.
+7. Original job titles remain unchanged.
+8. Dates remain unchanged.
+9. Education remains unchanged.
+10. Projects remain unchanged unless only wording is improved.
+11. No unsupported skills.
+12. No keyword stuffing.
+13. Resume remains readable.
+
+Return ONLY JSON:
+
+{{
+  "name": "",
+  "email": "",
+  "phone": "",
+  "location": "",
+  "linkedin": "",
+  "github": "",
+  "summary": "",
+  "skills": [],
+  "experience": [
+    {{
+      "title": "",
+      "company": "",
+      "location": "",
+      "dates": "",
+      "bullets": []
+    }}
+  ],
+  "projects": [
+    {{
+      "name": "",
+      "technologies": [],
+      "description": "",
+      "bullets": []
+    }}
+  ],
+  "education": [
+    {{
+      "degree": "",
+      "institution": "",
+      "location": "",
+      "dates": ""
+    }}
+  ],
+  "certifications": []
+}}
+"""
+
+    payload = {
+        "target_job_title":
+            target_title,
+
+        "job_description":
+            job_description,
+
+        "job_intelligence":
+            job_intelligence,
+
+        "original_resume":
+            original_resume,
+
+        "current_resume":
+            resume,
+
+        "ats":
+            ats,
+    }
+
+    return call_json_model(
+        instructions,
+        json.dumps(
+            payload,
+            indent=2,
+        ),
+    )
+
+
+# ============================================================
+# MULTI-ROUND OPTIMIZATION
+# ============================================================
+
+def optimize_resume_for_ats(
+    resume_text: str,
+    job_description: str,
+    job_intelligence: dict[str, Any],
+    original_resume: dict[str, Any],
+    baseline_ats: dict[str, Any],
+    max_rounds: int = 5,
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    int,
+]:
+
+    best_resume = original_resume
+
+    best_ats = baseline_ats
+
+    best_score = int(
+        baseline_ats.get(
+            "match_rate",
+            0,
+        )
+    )
+
+    rounds_completed = 0
+
+    for round_number in range(
+        1,
+        max_rounds + 1,
+    ):
+
+        rounds_completed = round_number
+
+        candidate_resume = (
+            tailor_resume_with_ai(
+                resume_text=resume_text,
+                job_description=job_description,
+                job_intelligence=job_intelligence,
+                original_resume=original_resume,
+                current_ats=best_ats,
+            )
+        )
+
+        candidate_ats = build_ats_audit(
+            resume=candidate_resume,
+            job_intelligence=job_intelligence,
+            filename="tailored-resume.docx",
+            file_type="DOCX",
+        )
+
+        candidate_score = int(
+            candidate_ats.get(
+                "match_rate",
+                0,
+            )
+        )
+
+        if candidate_score > best_score:
+
+            best_resume = candidate_resume
+
+            best_ats = candidate_ats
+
+            best_score = candidate_score
+
+        if best_score >= 90:
+
+            break
+
+    repaired_resume = (
+        repair_resume_for_jobscan(
+            resume=best_resume,
+            original_resume=original_resume,
+            job_description=job_description,
+            job_intelligence=job_intelligence,
+            ats=best_ats,
+        )
+    )
+
+    repaired_resume = (
+        ensure_target_title_in_summary(
+            repaired_resume,
+            job_intelligence.get(
+                "job_title",
+                "",
+            ),
+        )
+    )
+
+    repaired_ats = build_ats_audit(
+        resume=repaired_resume,
+        job_intelligence=job_intelligence,
+        filename="tailored-resume.docx",
+        file_type="DOCX",
+    )
+
+    repaired_score = int(
+        repaired_ats.get(
+            "match_rate",
+            0,
+        )
+    )
+
+    if repaired_score > best_score:
+
+        best_resume = repaired_resume
+
+        best_ats = repaired_ats
+
+        best_score = repaired_score
+
+    return (
+        best_resume,
+        best_ats,
+        rounds_completed,
+    )
+
+
+# ============================================================
+# COVER LETTER
+# ============================================================
+
+def generate_cover_letter_with_ai(
+    resume_text: str,
+    job_description: str,
+) -> dict[str, Any]:
+
+    instructions = """
+You are an expert professional cover letter writer.
+
+Create a focused professional cover letter.
+
+Use only facts supported by the resume.
+
+Never invent:
+- employers
+- technologies
+- metrics
+- achievements
+- experience
+
+Return ONLY JSON:
+
+{
+  "date": "",
+  "salutation": "Dear Hiring Manager,",
+  "opening": "",
+  "body_paragraphs": [],
+  "closing": "Kind regards,",
+  "signature": ""
+}
+"""
+
+    return call_json_model(
+        instructions,
+        (
+            "JOB DESCRIPTION:\n\n"
+            + job_description
+            + "\n\nRESUME:\n\n"
+            + resume_text
+        ),
+    )
+
+
+# ============================================================
 # DOCX HELPERS
-# =========================================================
+# ============================================================
 
-def add_bottom_border(
-    paragraph,
+def set_run_font(
+    run,
+    size: float = 10,
+    bold: bool = False,
 ):
 
-    p = paragraph._p
-
-    pPr = p.get_or_add_pPr()
-
-    pBdr = pPr.find(
-        qn("w:pBdr")
+    run.font.name = (
+        "Times New Roman"
     )
 
-    if pBdr is None:
+    r_pr = (
+        run._element.get_or_add_rPr()
+    )
 
-        pBdr = OxmlElement(
-            "w:pBdr"
+    r_fonts = r_pr.rFonts
+
+    if r_fonts is None:
+
+        r_fonts = OxmlElement(
+            "w:rFonts"
         )
 
-        pPr.append(
-            pBdr
+        r_pr.insert(
+            0,
+            r_fonts,
         )
+
+    r_fonts.set(
+        qn("w:eastAsia"),
+        "Times New Roman",
+    )
+
+    run.font.size = Pt(
+        size
+    )
+
+    run.bold = bold
+
+
+def add_heading_line(
+    document: Document,
+    title: str,
+):
+
+    p = document.add_paragraph()
+
+    p.paragraph_format.space_before = Pt(
+        9
+    )
+
+    p.paragraph_format.space_after = Pt(
+        4
+    )
+
+    run = p.add_run(
+        title.upper()
+    )
+
+    set_run_font(
+        run,
+        size=10,
+        bold=True,
+    )
+
+    p_pr = (
+        p._p.get_or_add_pPr()
+    )
+
+    p_bdr = OxmlElement(
+        "w:pBdr"
+    )
 
     bottom = OxmlElement(
         "w:bottom"
@@ -1477,29 +1536,41 @@ def add_bottom_border(
 
     bottom.set(
         qn("w:sz"),
-        "6",
+        "4",
     )
 
     bottom.set(
         qn("w:space"),
-        "1",
+        "4",
     )
 
     bottom.set(
         qn("w:color"),
-        "777777",
+        "666666",
     )
 
-    pBdr.append(
+    p_bdr.append(
         bottom
     )
 
+    p_pr.append(
+        p_bdr
+    )
 
-def setup_document(
-    document: Document,
-):
 
-    section = document.sections[0]
+# ============================================================
+# RESUME DOCX
+# ============================================================
+
+def render_resume_docx(
+    resume: dict[str, Any],
+) -> io.BytesIO:
+
+    document = Document()
+
+    section = (
+        document.sections[0]
+    )
 
     section.page_width = Inches(
         8.27
@@ -1525,722 +1596,470 @@ def setup_document(
         0.65
     )
 
-    normal = document.styles[
-        "Normal"
-    ]
+    # NAME
 
-    normal.font.name = (
-        "Times New Roman"
-    )
+    p = document.add_paragraph()
 
-    normal.font.size = Pt(
-        10.5
-    )
-
-    normal.font.bold = False
-    normal.font.italic = False
-
-    normal.paragraph_format.space_before = Pt(
-        0
-    )
-
-    normal.paragraph_format.space_after = Pt(
-        3
-    )
-
-    normal.paragraph_format.line_spacing = 1.0
-
-
-def add_section_heading(
-    document: Document,
-    title: str,
-):
-
-    paragraph = document.add_paragraph()
-
-    paragraph.paragraph_format.space_before = Pt(
-        10
-    )
-
-    paragraph.paragraph_format.space_after = Pt(
-        4
-    )
-
-    run = paragraph.add_run(
-        title.upper()
-    )
-
-    run.font.name = (
-        "Times New Roman"
-    )
-
-    run.font.size = Pt(
-        11
-    )
-
-    run.bold = True
-
-    add_bottom_border(
-        paragraph
-    )
-
-    return paragraph
-
-
-def add_bullet(
-    document: Document,
-    text: str,
-):
-
-    paragraph = (
-        document.add_paragraph()
-    )
-
-    paragraph.paragraph_format.left_indent = Inches(
-        0.18
-    )
-
-    paragraph.paragraph_format.first_line_indent = Inches(
-        -0.12
-    )
-
-    paragraph.paragraph_format.space_before = Pt(
-        0
-    )
-
-    paragraph.paragraph_format.space_after = Pt(
-        2
-    )
-
-    bullet_run = paragraph.add_run(
-        "• "
-    )
-
-    bullet_run.font.name = (
-        "Times New Roman"
-    )
-
-    bullet_run.font.size = Pt(
-        10.3
-    )
-
-    text_run = paragraph.add_run(
-        clean_text(text)
-    )
-
-    text_run.font.name = (
-        "Times New Roman"
-    )
-
-    text_run.font.size = Pt(
-        10.3
-    )
-
-    text_run.bold = False
-    text_run.italic = False
-
-    return paragraph
-
-
-# =========================================================
-# RESUME DOCX
-# =========================================================
-
-def build_resume_docx(
-    resume: Dict[str, Any],
-) -> bytes:
-
-    resume = normalize_resume(
-        resume
-    )
-
-    document = Document()
-
-    setup_document(
-        document
-    )
-
-    # -----------------------------------------------------
-    # HEADER
-    # -----------------------------------------------------
-
-    paragraph = document.add_paragraph()
-
-    paragraph.alignment = (
+    p.alignment = (
         WD_ALIGN_PARAGRAPH.CENTER
     )
 
-    paragraph.paragraph_format.space_after = Pt(
-        2
-    )
-
-    name_run = paragraph.add_run(
+    run = p.add_run(
         resume.get(
-            "name",
-            "Candidate",
+            "name"
         )
+        or "Candidate Name"
     )
 
-    name_run.font.name = (
-        "Times New Roman"
+    set_run_font(
+        run,
+        size=18,
+        bold=True,
     )
 
-    name_run.font.size = Pt(
-        17
-    )
+    # CONTACT
 
-    name_run.bold = True
-
-    location = clean_text(
+    contact = [
         resume.get(
             "location"
-        )
-    )
+        ),
+        resume.get(
+            "email"
+        ),
+        resume.get(
+            "phone"
+        ),
+        resume.get(
+            "linkedin"
+        ),
+        resume.get(
+            "github"
+        ),
+    ]
 
-    if location:
+    contact = [
+        str(item)
+        for item in contact
+        if item
+    ]
 
-        paragraph = document.add_paragraph()
+    if contact:
 
-        paragraph.alignment = (
+        p = document.add_paragraph()
+
+        p.alignment = (
             WD_ALIGN_PARAGRAPH.CENTER
         )
 
-        paragraph.paragraph_format.space_after = Pt(
-            1
+        p.paragraph_format.space_after = Pt(
+            7
         )
 
-        run = paragraph.add_run(
-            location
-        )
-
-        run.font.name = (
-            "Times New Roman"
-        )
-
-        run.font.size = Pt(
-            10
-        )
-
-    contacts = []
-
-    for field in [
-        "email",
-        "phone",
-        "linkedin",
-    ]:
-
-        value = clean_text(
-            resume.get(field)
-        )
-
-        if value:
-            contacts.append(
-                value
-            )
-
-    if contacts:
-
-        paragraph = document.add_paragraph()
-
-        paragraph.alignment = (
-            WD_ALIGN_PARAGRAPH.CENTER
-        )
-
-        paragraph.paragraph_format.space_after = Pt(
-            1
-        )
-
-        run = paragraph.add_run(
+        run = p.add_run(
             " | ".join(
-                contacts
+                contact
             )
         )
 
-        run.font.name = (
-            "Times New Roman"
+        set_run_font(
+            run,
+            size=8.5,
         )
 
-        run.font.size = Pt(
-            9.5
-        )
-
-    authorization = clean_text(
-        resume.get(
-            "authorization"
-        )
-    )
-
-    if authorization:
-
-        paragraph = document.add_paragraph()
-
-        paragraph.alignment = (
-            WD_ALIGN_PARAGRAPH.CENTER
-        )
-
-        paragraph.paragraph_format.space_after = Pt(
-            4
-        )
-
-        run = paragraph.add_run(
-            authorization
-        )
-
-        run.font.name = (
-            "Times New Roman"
-        )
-
-        run.font.size = Pt(
-            9
-        )
-
-    # -----------------------------------------------------
     # SUMMARY
-    # -----------------------------------------------------
 
-    summary = clean_text(
-        resume.get(
-            "summary"
-        )
-    )
+    if resume.get(
+        "summary"
+    ):
 
-    if summary:
-
-        add_section_heading(
+        add_heading_line(
             document,
             "Professional Summary",
         )
 
-        paragraph = document.add_paragraph()
+        p = document.add_paragraph()
 
-        paragraph.paragraph_format.space_after = Pt(
-            4
+        run = p.add_run(
+            str(
+                resume[
+                    "summary"
+                ]
+            )
         )
 
-        run = paragraph.add_run(
-            summary
+        set_run_font(
+            run,
+            size=9.3,
         )
 
-        run.font.name = (
-            "Times New Roman"
-        )
-
-        run.font.size = Pt(
-            10.3
-        )
-
-        run.bold = False
-        run.italic = False
-
-    # -----------------------------------------------------
     # SKILLS
-    # -----------------------------------------------------
 
-    skills = safe_dict(
+    skills = (
         resume.get(
             "skills"
         )
+        or []
     )
 
-    if any(
-        skills.values()
-    ):
+    if skills:
 
-        add_section_heading(
+        add_heading_line(
             document,
             "Technical Skills",
         )
 
-        for category, values in skills.items():
+        p = document.add_paragraph()
 
-            if not values:
-                continue
-
-            paragraph = document.add_paragraph()
-
-            paragraph.paragraph_format.space_after = Pt(
-                2
+        run = p.add_run(
+            ", ".join(
+                str(item)
+                for item in skills
             )
+        )
 
-            label = paragraph.add_run(
-                f"{category}: "
-            )
+        set_run_font(
+            run,
+            size=9.1,
+        )
 
-            label.font.name = (
-                "Times New Roman"
-            )
-
-            label.font.size = Pt(
-                10
-            )
-
-            label.bold = True
-
-            run = paragraph.add_run(
-                ", ".join(
-                    values
-                )
-            )
-
-            run.font.name = (
-                "Times New Roman"
-            )
-
-            run.font.size = Pt(
-                10
-            )
-
-            run.bold = False
-
-    # -----------------------------------------------------
     # EXPERIENCE
-    # -----------------------------------------------------
 
-    experience = safe_list(
+    experience = (
         resume.get(
             "experience"
         )
+        or []
     )
 
     if experience:
 
-        add_section_heading(
+        add_heading_line(
             document,
             "Professional Experience",
         )
 
         for job in experience:
 
-            paragraph = document.add_paragraph()
+            if not isinstance(
+                job,
+                dict,
+            ):
+                continue
 
-            paragraph.paragraph_format.space_before = Pt(
-                3
-            )
+            p = document.add_paragraph()
 
-            paragraph.paragraph_format.space_after = Pt(
-                1
-            )
-
-            paragraph.paragraph_format.tab_stops.add_tab_stop(
-                Inches(6.85)
-            )
-
-            title_run = paragraph.add_run(
-                clean_text(
-                    job.get(
-                        "title"
-                    )
-                )
-            )
-
-            title_run.font.name = (
-                "Times New Roman"
-            )
-
-            title_run.font.size = Pt(
-                10.5
-            )
-
-            title_run.bold = True
-
-            dates = clean_text(
+            run = p.add_run(
                 job.get(
-                    "dates"
+                    "title"
                 )
+                or ""
+            )
+
+            set_run_font(
+                run,
+                size=9.6,
+                bold=True,
+            )
+
+            dates = job.get(
+                "dates"
             )
 
             if dates:
 
-                date_run = paragraph.add_run(
-                    "\t" + dates
+                run = p.add_run(
+                    f" | {dates}"
                 )
 
-                date_run.font.name = (
-                    "Times New Roman"
+                set_run_font(
+                    run,
+                    size=8.8,
                 )
 
-                date_run.font.size = Pt(
-                    10
-                )
-
-                date_run.bold = False
-
-            company_parts = []
-
-            company = clean_text(
-                job.get(
-                    "company"
-                )
+            company = job.get(
+                "company"
             )
 
-            location = clean_text(
-                job.get(
-                    "location"
-                )
+            location = job.get(
+                "location"
             )
 
-            if company:
-                company_parts.append(
-                    company
-                )
+            company_text = (
+                company
+                or ""
+            )
 
             if location:
-                company_parts.append(
-                    location
+
+                company_text += (
+                    f" | {location}"
                 )
 
-            if company_parts:
+            if company_text:
 
-                paragraph = document.add_paragraph()
+                p = document.add_paragraph()
 
-                paragraph.paragraph_format.space_after = Pt(
-                    2
+                run = p.add_run(
+                    company_text
                 )
 
-                run = paragraph.add_run(
-                    " | ".join(
-                        company_parts
-                    )
+                set_run_font(
+                    run,
+                    size=8.9,
                 )
 
-                run.font.name = (
-                    "Times New Roman"
-                )
-
-                run.font.size = Pt(
-                    9.8
-                )
-
-                run.bold = False
-
-            for bullet in safe_list(
+            for bullet in (
                 job.get(
                     "bullets"
                 )
+                or []
             ):
 
-                if clean_text(bullet):
+                p = document.add_paragraph()
 
-                    add_bullet(
-                        document,
-                        bullet,
+                p.paragraph_format.left_indent = Inches(
+                    0.18
+                )
+
+                p.paragraph_format.first_line_indent = Inches(
+                    -0.13
+                )
+
+                p.paragraph_format.space_after = Pt(
+                    2
+                )
+
+                run = p.add_run(
+                    "• "
+                    + str(
+                        bullet
                     )
+                )
 
-    # -----------------------------------------------------
+                set_run_font(
+                    run,
+                    size=9,
+                )
+
     # PROJECTS
-    # -----------------------------------------------------
 
-    projects = safe_list(
+    projects = (
         resume.get(
             "projects"
         )
+        or []
     )
 
     if projects:
 
-        add_section_heading(
+        add_heading_line(
             document,
             "Projects",
         )
 
         for project in projects:
 
-            paragraph = document.add_paragraph()
+            if not isinstance(
+                project,
+                dict,
+            ):
+                continue
 
-            paragraph.paragraph_format.space_before = Pt(
-                3
-            )
+            p = document.add_paragraph()
 
-            paragraph.paragraph_format.space_after = Pt(
-                1
-            )
-
-            run = paragraph.add_run(
-                clean_text(
-                    project.get(
-                        "title"
-                    )
+            run = p.add_run(
+                project.get(
+                    "name"
                 )
+                or ""
             )
 
-            run.font.name = (
-                "Times New Roman"
+            set_run_font(
+                run,
+                size=9.5,
+                bold=True,
             )
 
-            run.font.size = Pt(
-                10.5
-            )
-
-            run.bold = True
-
-            technologies = [
-                clean_text(tech)
-                for tech in safe_list(
-                    project.get(
-                        "technologies"
-                    )
+            technologies = (
+                project.get(
+                    "technologies"
                 )
-                if clean_text(tech)
-            ]
+                or []
+            )
 
             if technologies:
 
-                paragraph = document.add_paragraph()
-
-                paragraph.paragraph_format.space_after = Pt(
-                    2
-                )
-
-                run = paragraph.add_run(
-                    ", ".join(
-                        technologies
+                run = p.add_run(
+                    " | "
+                    + ", ".join(
+                        str(item)
+                        for item in technologies
                     )
                 )
 
-                run.font.name = (
-                    "Times New Roman"
+                set_run_font(
+                    run,
+                    size=8.7,
                 )
 
-                run.font.size = Pt(
-                    9.5
+            if project.get(
+                "description"
+            ):
+
+                p = document.add_paragraph()
+
+                run = p.add_run(
+                    str(
+                        project[
+                            "description"
+                        ]
+                    )
                 )
 
-                run.italic = True
-                run.bold = False
+                set_run_font(
+                    run,
+                    size=9,
+                )
 
-            for bullet in safe_list(
+            for bullet in (
                 project.get(
                     "bullets"
                 )
+                or []
             ):
 
-                if clean_text(bullet):
+                p = document.add_paragraph()
 
-                    add_bullet(
-                        document,
-                        bullet,
+                p.paragraph_format.left_indent = Inches(
+                    0.18
+                )
+
+                p.paragraph_format.first_line_indent = Inches(
+                    -0.13
+                )
+
+                run = p.add_run(
+                    "• "
+                    + str(
+                        bullet
                     )
+                )
 
-    # -----------------------------------------------------
+                set_run_font(
+                    run,
+                    size=9,
+                )
+
     # EDUCATION
-    # -----------------------------------------------------
 
-    education = safe_list(
+    education = (
         resume.get(
             "education"
         )
+        or []
     )
 
     if education:
 
-        add_section_heading(
+        add_heading_line(
             document,
             "Education",
         )
 
         for item in education:
 
-            paragraph = document.add_paragraph()
+            if not isinstance(
+                item,
+                dict,
+            ):
+                continue
 
-            paragraph.paragraph_format.space_before = Pt(
-                2
-            )
+            p = document.add_paragraph()
 
-            paragraph.paragraph_format.space_after = Pt(
-                1
-            )
-
-            paragraph.paragraph_format.tab_stops.add_tab_stop(
-                Inches(6.85)
-            )
-
-            degree_run = paragraph.add_run(
-                clean_text(
-                    item.get(
-                        "degree"
-                    )
-                )
-            )
-
-            degree_run.font.name = (
-                "Times New Roman"
-            )
-
-            degree_run.font.size = Pt(
-                10.5
-            )
-
-            degree_run.bold = True
-
-            dates = clean_text(
+            run = p.add_run(
                 item.get(
-                    "dates"
+                    "degree"
                 )
+                or ""
             )
 
-            if dates:
-
-                run = paragraph.add_run(
-                    "\t" + dates
-                )
-
-                run.font.name = (
-                    "Times New Roman"
-                )
-
-                run.font.size = Pt(
-                    10
-                )
-
-                run.bold = False
-
-            institution_parts = []
-
-            institution = clean_text(
-                item.get(
-                    "institution"
-                )
+            set_run_font(
+                run,
+                size=9.4,
+                bold=True,
             )
 
-            location = clean_text(
-                item.get(
-                    "location"
-                )
-            )
+            details = []
 
-            if institution:
-                institution_parts.append(
-                    institution
-                )
+            if item.get(
+                "institution"
+            ):
 
-            if location:
-                institution_parts.append(
-                    location
-                )
-
-            if institution_parts:
-
-                paragraph = document.add_paragraph()
-
-                paragraph.paragraph_format.space_after = Pt(
-                    2
-                )
-
-                run = paragraph.add_run(
-                    " | ".join(
-                        institution_parts
+                details.append(
+                    str(
+                        item[
+                            "institution"
+                        ]
                     )
                 )
 
-                run.font.name = (
-                    "Times New Roman"
+            if item.get(
+                "dates"
+            ):
+
+                details.append(
+                    str(
+                        item[
+                            "dates"
+                        ]
+                    )
                 )
 
-                run.font.size = Pt(
-                    9.8
+            if details:
+
+                run = p.add_run(
+                    "\n"
+                    + " | ".join(
+                        details
+                    )
                 )
 
-                run.bold = False
+                set_run_font(
+                    run,
+                    size=8.8,
+                )
+
+    # CERTIFICATIONS
+
+    certifications = (
+        resume.get(
+            "certifications"
+        )
+        or []
+    )
+
+    if certifications:
+
+        add_heading_line(
+            document,
+            "Certifications",
+        )
+
+        for certification in certifications:
+
+            p = document.add_paragraph()
+
+            run = p.add_run(
+                "• "
+                + str(
+                    certification
+                )
+            )
+
+            set_run_font(
+                run,
+                size=9,
+            )
 
     output = io.BytesIO()
 
@@ -2248,84 +2067,175 @@ def build_resume_docx(
         output
     )
 
-    return output.getvalue()
+    output.seek(0)
+
+    return output
 
 
-# =========================================================
+# ============================================================
 # COVER LETTER DOCX
-# =========================================================
+# ============================================================
 
-def build_cover_letter_docx(
-    content: str,
-) -> bytes:
+def render_cover_letter_docx(
+    letter: Any,
+) -> io.BytesIO:
 
     document = Document()
 
-    setup_document(
-        document
+    section = (
+        document.sections[0]
     )
 
-    normal = document.styles[
-        "Normal"
-    ]
-
-    normal.font.name = (
-        "Times New Roman"
+    section.page_width = Inches(
+        8.27
     )
 
-    normal.font.size = Pt(
-        11
+    section.page_height = Inches(
+        11.69
     )
 
-    normal.font.bold = False
-    normal.font.italic = False
-
-    normal.paragraph_format.space_before = Pt(
-        0
+    section.top_margin = Inches(
+        0.8
     )
 
-    normal.paragraph_format.space_after = Pt(
-        10
+    section.bottom_margin = Inches(
+        0.8
     )
 
-    normal.paragraph_format.line_spacing = 1.15
-
-    paragraphs = re.split(
-        r"\n\s*\n",
-        content.strip(),
+    section.left_margin = Inches(
+        0.85
     )
 
-    for paragraph_text in paragraphs:
+    section.right_margin = Inches(
+        0.85
+    )
 
-        paragraph_text = (
-            paragraph_text.strip()
+    if isinstance(
+        letter,
+        str,
+    ):
+
+        for block in letter.split(
+            "\n"
+        ):
+
+            p = document.add_paragraph()
+
+            run = p.add_run(
+                block
+            )
+
+            set_run_font(
+                run,
+                size=11,
+            )
+
+    else:
+
+        if letter.get(
+            "date"
+        ):
+
+            p = document.add_paragraph()
+
+            run = p.add_run(
+                str(
+                    letter[
+                        "date"
+                    ]
+                )
+            )
+
+            set_run_font(
+                run,
+                size=11,
+            )
+
+        p = document.add_paragraph()
+
+        run = p.add_run(
+            letter.get(
+                "salutation"
+            )
+            or "Dear Hiring Manager,"
         )
 
-        if not paragraph_text:
-            continue
-
-        paragraph = document.add_paragraph()
-
-        paragraph.paragraph_format.space_after = Pt(
-            10
+        set_run_font(
+            run,
+            size=11,
         )
 
-        paragraph.paragraph_format.line_spacing = 1.15
+        if letter.get(
+            "opening"
+        ):
 
-        run = paragraph.add_run(
-            paragraph_text
+            p = document.add_paragraph()
+
+            run = p.add_run(
+                str(
+                    letter[
+                        "opening"
+                    ]
+                )
+            )
+
+            set_run_font(
+                run,
+                size=11,
+            )
+
+        for paragraph in (
+            letter.get(
+                "body_paragraphs"
+            )
+            or []
+        ):
+
+            p = document.add_paragraph()
+
+            p.paragraph_format.space_after = Pt(
+                9
+            )
+
+            run = p.add_run(
+                str(
+                    paragraph
+                )
+            )
+
+            set_run_font(
+                run,
+                size=11,
+            )
+
+        p = document.add_paragraph()
+
+        run = p.add_run(
+            letter.get(
+                "closing"
+            )
+            or "Kind regards,"
         )
 
-        run.font.name = (
-            "Times New Roman"
+        set_run_font(
+            run,
+            size=11,
         )
 
-        run.font.size = Pt(
-            11
+        p = document.add_paragraph()
+
+        run = p.add_run(
+            letter.get(
+                "signature"
+            )
+            or ""
         )
 
-        run.bold = False
-        run.italic = False
+        set_run_font(
+            run,
+            size=11,
+            bold=True,
+        )
 
     output = io.BytesIO()
 
@@ -2333,358 +2243,375 @@ def build_cover_letter_docx(
         output
     )
 
-    return output.getvalue()
+    output.seek(0)
+
+    return output
 
 
-# =========================================================
-# REQUEST MODELS
-# =========================================================
-
-class TailorResumeRequest(
-    BaseModel
-):
-    resume_text: str = Field(
-        default=""
-    )
-
-    job_description: str = Field(
-        default=""
-    )
-
-    analysis: Optional[
-        Dict[str, Any]
-    ] = None
-
-
-class CoverLetterRequest(
-    BaseModel
-):
-    resume_text: str = Field(
-        default=""
-    )
-
-    job_description: str = Field(
-        default=""
-    )
-
-    analysis: Optional[
-        Dict[str, Any]
-    ] = None
-
-
-class DownloadResumeRequest(
-    BaseModel
-):
-    tailored_resume: Optional[
-        Dict[str, Any]
-    ] = None
-
-    tailored_resume_text: Optional[
-        str
-    ] = None
-
-
-class DownloadCoverLetterRequest(
-    BaseModel
-):
-    cover_letter: str = Field(
-        default=""
-    )
-
-
-# =========================================================
-# ROOT
-# =========================================================
-
-@app.get("/")
-def root():
-
-    return {
-        "status": "ok",
-        "message": (
-            "AI Job Application Agent API "
-            "is running"
-        ),
-    }
-
-
-# =========================================================
-# HEALTH
-# =========================================================
-
-@app.get("/health")
-def health():
-
-    return {
-        "status": "ok"
-    }
-
-
-# =========================================================
+# ============================================================
 # ANALYZE
-# =========================================================
+# ============================================================
 
 @app.post("/analyze")
-async def analyze_job(
-
+async def analyze(
     resume: UploadFile = File(...),
-
-    job_description: str = Form(
-        ""
-    ),
-
-    job_url: str = Form(
-        ""
-    ),
+    job_description: str = Form(""),
+    ashby_url: str = Form(""),
 ):
 
-    resume_text = (
-        await extract_resume_text(
-            resume
+    data = await read_upload(
+        resume
+    )
+
+    resume_text = extract_resume_text(
+        resume.filename,
+        data,
+    )
+
+    final_job_description = (
+        resolve_job_description(
+            job_description,
+            ashby_url,
         )
     )
 
     try:
 
-        resolved_job = (
-            resolve_job_description(
-                job_description,
-                job_url,
+        resume_data = structure_resume(
+            resume_text
+        )
+
+        job_intelligence = (
+            extract_job_intelligence(
+                final_job_description
             )
         )
-
-    except ValueError as exc:
-
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-    actual_job_description = (
-        resolved_job[
-            "job_description"
-        ]
-    )
-
-    detected_job_title = clean_text(
-        resolved_job.get(
-            "job_title"
-        )
-    )
-
-    source_url = clean_text(
-        resolved_job.get(
-            "source_url"
-        )
-    )
-
-    try:
 
         analysis = (
-            analyze_application(
-                actual_job_description,
+            analyze_resume_against_job(
                 resume_text,
+                final_job_description,
+                job_intelligence,
             )
         )
+
+        file_type = (
+            "PDF"
+            if resume.filename.lower().endswith(
+                ".pdf"
+            )
+            else "DOCX"
+        )
+
+        ats = build_ats_audit(
+            resume=resume_data,
+            job_intelligence=job_intelligence,
+            filename=resume.filename,
+            file_type=file_type,
+        )
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
 
         raise HTTPException(
             status_code=500,
             detail=(
-                "AI job analysis failed. "
-                f"{str(exc)}"
+                "Analysis failed: "
+                f"{exc}"
             ),
         ) from exc
 
-    if not analysis.get(
-        "job_title"
-    ):
-
-        analysis[
-            "job_title"
-        ] = detected_job_title
-
     return {
-        "analysis": analysis,
-        "resume_text": resume_text,
-        "job_description": (
-            actual_job_description
-        ),
-        "job_url": source_url,
-        "job_title": clean_text(
-            analysis.get(
-                "job_title"
-            )
-        ),
+        "job_description":
+            final_job_description,
+
+        "job_intelligence":
+            job_intelligence,
+
+        "analysis":
+            analysis,
+
+        "ats":
+            ats,
     }
 
 
-# =========================================================
+# ============================================================
 # TAILOR
-# =========================================================
+# ============================================================
 
 @app.post("/tailor")
-async def tailor_job_resume(
-    request: TailorResumeRequest,
+async def tailor(
+    resume: UploadFile = File(...),
+    job_description: str = Form(""),
+    ashby_url: str = Form(""),
 ):
 
-    if not request.resume_text.strip():
+    data = await read_upload(
+        resume
+    )
 
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Resume text is required."
-            ),
+    resume_text = extract_resume_text(
+        resume.filename,
+        data,
+    )
+
+    final_job_description = (
+        resolve_job_description(
+            job_description,
+            ashby_url,
         )
-
-    if not request.job_description.strip():
-
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Job description is required."
-            ),
-        )
+    )
 
     try:
+
+        original_resume = (
+            structure_resume(
+                resume_text
+            )
+        )
+
+        job_intelligence = (
+            extract_job_intelligence(
+                final_job_description
+            )
+        )
+
+        analysis = (
+            analyze_resume_against_job(
+                resume_text,
+                final_job_description,
+                job_intelligence,
+            )
+        )
+
+        original_file_type = (
+            "PDF"
+            if resume.filename.lower().endswith(
+                ".pdf"
+            )
+            else "DOCX"
+        )
+
+        baseline_ats = build_ats_audit(
+            resume=original_resume,
+            job_intelligence=job_intelligence,
+            filename=resume.filename,
+            file_type=original_file_type,
+        )
+
+        (
+            tailored_resume,
+            tailored_ats,
+            optimization_rounds,
+        ) = optimize_resume_for_ats(
+            resume_text=resume_text,
+            job_description=final_job_description,
+            job_intelligence=job_intelligence,
+            original_resume=original_resume,
+            baseline_ats=baseline_ats,
+            max_rounds=5,
+        )
 
         tailored_resume = (
-            tailor_resume(
-                request.job_description,
-                request.resume_text,
+            ensure_target_title_in_summary(
+                tailored_resume,
+                job_intelligence.get(
+                    "job_title",
+                    "",
+                ),
             )
         )
+
+        tailored_ats = build_ats_audit(
+            resume=tailored_resume,
+            job_intelligence=job_intelligence,
+            filename="tailored-resume.docx",
+            file_type="DOCX",
+        )
+
+        baseline_score = int(
+            baseline_ats.get(
+                "match_rate",
+                0,
+            )
+        )
+
+        tailored_score = int(
+            tailored_ats.get(
+                "match_rate",
+                0,
+            )
+        )
+
+        score_change = (
+            tailored_score
+            - baseline_score
+        )
+
+        tailored_ats[
+            "baseline_match_rate"
+        ] = baseline_score
+
+        tailored_ats[
+            "tailored_match_rate"
+        ] = tailored_score
+
+        tailored_ats[
+            "score_change"
+        ] = score_change
+
+        tailored_ats[
+            "optimization_rounds"
+        ] = optimization_rounds
+
+        tailored_ats[
+            "optimization_target"
+        ] = 90
+
+        tailored_ats[
+            "target_reached"
+        ] = (
+            tailored_score >= 90
+        )
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
 
         raise HTTPException(
             status_code=500,
             detail=(
-                "Resume tailoring failed. "
-                f"{str(exc)}"
+                "Resume tailoring failed: "
+                f"{exc}"
             ),
         ) from exc
 
     return {
+        "job_description":
+            final_job_description,
+
+        "job_intelligence":
+            job_intelligence,
+
+        "analysis":
+            analysis,
+
+        "original_resume":
+            original_resume,
+
+        "baseline_ats":
+            baseline_ats,
+
         "tailored_resume":
-            tailored_resume
+            tailored_resume,
+
+        "ats":
+            tailored_ats,
+
+        "comparison": {
+            "baseline":
+                baseline_score,
+
+            "tailored":
+                tailored_score,
+
+            "change":
+                score_change,
+        },
     }
 
 
-# =========================================================
+# ============================================================
 # COVER LETTER
-# =========================================================
+# ============================================================
 
 @app.post("/cover-letter")
-async def create_cover_letter(
-    request: CoverLetterRequest,
+async def cover_letter(
+    resume: UploadFile = File(...),
+    job_description: str = Form(""),
+    ashby_url: str = Form(""),
 ):
 
-    if not request.resume_text.strip():
+    data = await read_upload(
+        resume
+    )
 
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Resume text is required."
-            ),
+    resume_text = extract_resume_text(
+        resume.filename,
+        data,
+    )
+
+    final_job_description = (
+        resolve_job_description(
+            job_description,
+            ashby_url,
         )
-
-    if not request.job_description.strip():
-
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Job description is required."
-            ),
-        )
+    )
 
     try:
 
-        cover_letter = (
-            generate_cover_letter(
-                request.job_description,
-                request.resume_text,
+        letter = (
+            generate_cover_letter_with_ai(
+                resume_text,
+                final_job_description,
             )
         )
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
 
         raise HTTPException(
             status_code=500,
             detail=(
-                "Cover letter generation "
-                "failed. "
-                f"{str(exc)}"
+                "Cover letter generation failed: "
+                f"{exc}"
             ),
         ) from exc
 
     return {
+        "job_description":
+            final_job_description,
+
         "cover_letter":
-            cover_letter
+            letter,
     }
 
 
-# =========================================================
+# ============================================================
 # DOWNLOAD RESUME
-# =========================================================
+# ============================================================
 
 @app.post("/download-resume")
 async def download_resume(
-    request: DownloadResumeRequest,
+    payload: dict[str, Any],
 ):
 
-    resume_data = (
-        request.tailored_resume
+    resume_data = payload.get(
+        "tailored_resume"
     )
 
-    if not resume_data:
+    if not isinstance(
+        resume_data,
+        dict,
+    ):
 
-        if not request.tailored_resume_text:
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "No tailored resume "
-                    "was provided."
-                ),
-            )
-
-        lines = [
-            line.strip()
-            for line in (
-                request
-                .tailored_resume_text
-                .splitlines()
-            )
-            if line.strip()
-        ]
-
-        resume_data = {
-            "name": (
-                lines[0]
-                if lines
-                else "Tailored Resume"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Tailored resume data is missing."
             ),
-            "summary": (
-                "\n".join(
-                    lines[1:]
-                )
-                if len(lines) > 1
-                else ""
-            ),
-            "skills": {},
-            "experience": [],
-            "projects": [],
-            "education": [],
-        }
+        )
 
     try:
 
-        document_bytes = (
-            build_resume_docx(
-                resume_data
-            )
+        document = render_resume_docx(
+            resume_data
         )
 
     except Exception as exc:
@@ -2692,52 +2619,51 @@ async def download_resume(
         raise HTTPException(
             status_code=500,
             detail=(
-                "Could not create the "
-                "resume DOCX. "
-                f"{str(exc)}"
+                "Unable to create resume DOCX: "
+                f"{exc}"
             ),
         ) from exc
 
-    return Response(
-        content=document_bytes,
+    return StreamingResponse(
+        document,
         media_type=(
-            "application/vnd.openxmlformats-"
-            "officedocument.wordprocessingml.document"
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document"
         ),
         headers={
-            "Content-Disposition": (
-                'attachment; '
-                'filename="tailored_resume.docx"'
-            )
+            "Content-Disposition":
+                'attachment; filename="tailored-resume.docx"'
         },
     )
 
 
-# =========================================================
+# ============================================================
 # DOWNLOAD COVER LETTER
-# =========================================================
+# ============================================================
 
-@app.post(
-    "/download-cover-letter"
-)
+@app.post("/download-cover-letter")
 async def download_cover_letter(
-    request: DownloadCoverLetterRequest,
+    payload: dict[str, Any],
 ):
 
-    if not request.cover_letter.strip():
+    letter = payload.get(
+        "cover_letter"
+    )
+
+    if not letter:
 
         raise HTTPException(
             status_code=400,
             detail=(
-                "No cover letter was provided."
+                "Cover letter data is missing."
             ),
         )
 
     try:
 
-        document_bytes = (
-            build_cover_letter_docx(
-                request.cover_letter
+        document = (
+            render_cover_letter_docx(
+                letter
             )
         )
 
@@ -2746,22 +2672,19 @@ async def download_cover_letter(
         raise HTTPException(
             status_code=500,
             detail=(
-                "Could not create the "
-                "cover letter DOCX. "
-                f"{str(exc)}"
+                "Unable to create cover letter DOCX: "
+                f"{exc}"
             ),
         ) from exc
 
-    return Response(
-        content=document_bytes,
+    return StreamingResponse(
+        document,
         media_type=(
-            "application/vnd.openxmlformats-"
-            "officedocument.wordprocessingml.document"
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document"
         ),
         headers={
-            "Content-Disposition": (
-                'attachment; '
-                'filename="cover_letter.docx"'
-            )
+            "Content-Disposition":
+                'attachment; filename="cover-letter.docx"'
         },
     )

@@ -1,16 +1,54 @@
-# React + Vite
+# 🤖 AI Job Application Agent
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+An AI-powered job application assistant that analyzes a job posting against a resume, identifies skill gaps, tailors the resume, and generates a personalized cover letter.
 
-Currently, two official plugins are available:
+## 🚀 Live Demo
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+https://ai-job-application-agent-swart.vercel.app/
 
-## React Compiler
+## ✨ Features
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- Upload a resume in PDF or DOCX format
+- Enter a job posting URL
+- Automatically extract public Ashby job postings
+- Paste a job description manually
+- Analyze resume-to-job alignment
+- Generate a match score
+- Identify matching skills
+- Identify skill gaps
+- Compare required and candidate experience
+- Extract important job keywords
+- Generate a job-targeted resume
+- Generate a personalized cover letter
+- Download the tailored resume as DOCX
+- Download the cover letter as DOCX
 
-## Expanding the Oxlint configuration
+## 🏗️ Architecture
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+```text
+User
+ │
+ ▼
+React + Vite Frontend
+ │
+ │ HTTP requests
+ ▼
+FastAPI Backend
+ │
+ ├── Resume Parser
+ │      ├── PDF
+ │      └── DOCX
+ │
+ ├── Ashby Job Extraction
+ │
+ └── OpenAI API
+        │
+        ├── Job Analysis
+        ├── Resume Tailoring
+        └── Cover Letter Generation
+ │
+ ▼
+Generated Application
+ │
+ ├── Tailored Resume
+ └── Cover Letter
