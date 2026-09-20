@@ -30,7 +30,7 @@ from backend.ats import build_ats_audit
 
 
 # ============================================================
-# CONFIGURATION
+# CONFIG
 # ============================================================
 
 PROJECT_ROOT = (
@@ -54,25 +54,24 @@ FRONTEND_URL = os.getenv(
 )
 
 if not OPENAI_API_KEY:
-
     raise RuntimeError(
         "OPENAI_API_KEY is not configured."
     )
 
 client = OpenAI(
     api_key=OPENAI_API_KEY,
-    timeout=90.0,
+    timeout=75.0,
     max_retries=0,
 )
 
 
 # ============================================================
-# FASTAPI
+# APP
 # ============================================================
 
 app = FastAPI(
     title="JobPilot AI",
-    version="6.0.0",
+    version="7.0.0",
 )
 
 allowed_origins = [
@@ -109,31 +108,29 @@ app.add_middleware(
 
 
 # ============================================================
-# BASIC ENDPOINTS
+# BASIC
 # ============================================================
 
 @app.get("/")
 def root():
-
     return {
         "name": "JobPilot AI",
         "status": "online",
-        "version": "6.0.0",
+        "version": "7.0.0",
     }
 
 
 @app.get("/health")
 def health():
-
     return {
         "status": "healthy",
         "service": "JobPilot AI",
-        "version": "6.0.0",
+        "version": "7.0.0",
     }
 
 
 # ============================================================
-# FILE VALIDATION
+# FILE HANDLING
 # ============================================================
 
 async def read_upload(
@@ -141,7 +138,6 @@ async def read_upload(
 ) -> bytes:
 
     if not file.filename:
-
         raise HTTPException(
             status_code=400,
             detail="A resume file is required.",
@@ -155,7 +151,6 @@ async def read_upload(
         ".pdf",
         ".docx",
     }:
-
         raise HTTPException(
             status_code=400,
             detail=(
@@ -166,16 +161,12 @@ async def read_upload(
     data = await file.read()
 
     if not data:
-
         raise HTTPException(
             status_code=400,
             detail="The uploaded resume is empty.",
         )
 
-    if len(data) > (
-        8 * 1024 * 1024
-    ):
-
+    if len(data) > 8 * 1024 * 1024:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -198,23 +189,18 @@ def extract_pdf_text(
         io.BytesIO(data)
     )
 
-    pages = []
+    parts: list[str] = []
 
     for page in reader.pages:
-
         text = (
             page.extract_text()
             or ""
         ).strip()
 
         if text:
-            pages.append(
-                text
-            )
+            parts.append(text)
 
-    return "\n".join(
-        pages
-    ).strip()
+    return "\n".join(parts).strip()
 
 
 def extract_docx_text(
@@ -225,7 +211,7 @@ def extract_docx_text(
         io.BytesIO(data)
     )
 
-    parts = []
+    parts: list[str] = []
 
     for paragraph in document.paragraphs:
 
@@ -235,9 +221,7 @@ def extract_docx_text(
         ).strip()
 
         if text:
-            parts.append(
-                text
-            )
+            parts.append(text)
 
     for table in document.tables:
 
@@ -251,13 +235,9 @@ def extract_docx_text(
                 ).strip()
 
                 if text:
-                    parts.append(
-                        text
-                    )
+                    parts.append(text)
 
-    return "\n".join(
-        parts
-    ).strip()
+    return "\n".join(parts).strip()
 
 
 def extract_resume_text(
@@ -301,7 +281,7 @@ def extract_resume_text(
 
 
 # ============================================================
-# OPENAI JSON
+# JSON HELPERS
 # ============================================================
 
 def parse_json_response(
@@ -332,7 +312,6 @@ def parse_json_response(
             parsed,
             dict,
         ):
-
             return parsed
 
     except json.JSONDecodeError:
@@ -360,7 +339,6 @@ def parse_json_response(
                 parsed,
                 dict,
             ):
-
                 return parsed
 
         except json.JSONDecodeError:
@@ -401,20 +379,30 @@ You are an expert resume parser.
 Convert the resume into structured JSON.
 
 IMPORTANT:
-Do not invent facts.
 
-Preserve the candidate's actual:
-- name
-- contact information
+Never invent facts.
+
+Preserve:
+- candidate name
+- email
+- phone
+- location
+- LinkedIn
+- GitHub
 - summary
 - skills
 - employers
-- titles
+- job titles
 - dates
+- bullets
 - projects
 - education
 - certifications
-- achievements
+- real achievements
+- real measurements
+
+Do not rewrite the content substantially.
+This is primarily a structured extraction step.
 
 Return ONLY valid JSON:
 
@@ -493,6 +481,9 @@ def extract_ashby_job(
     posting_id = match.group(2)
 
     api_url = (
+        "https://api.ashby.com/"
+        if False
+        else
         "https://api.ashbyhq.com/"
         f"posting-api/job-board/{board_name}"
     )
@@ -501,7 +492,7 @@ def extract_ashby_job(
 
         response = requests.get(
             api_url,
-            timeout=20,
+            timeout=15,
         )
 
         response.raise_for_status()
@@ -518,9 +509,7 @@ def extract_ashby_job(
         ) from exc
 
     jobs = (
-        payload.get(
-            "jobs"
-        )
+        payload.get("jobs")
         or []
     )
 
@@ -541,16 +530,12 @@ def extract_ashby_job(
         for job in jobs:
 
             job_id = str(
-                job.get(
-                    "id"
-                )
+                job.get("id")
                 or ""
             )
 
             job_url = str(
-                job.get(
-                    "jobUrl"
-                )
+                job.get("jobUrl")
                 or ""
             )
 
@@ -575,9 +560,7 @@ def extract_ashby_job(
         selected = jobs[0]
 
     title = (
-        selected.get(
-            "title"
-        )
+        selected.get("title")
         or ""
     )
 
@@ -605,7 +588,7 @@ def extract_ashby_job(
 
 
 # ============================================================
-# JOB RESOLUTION
+# JOB INPUT
 # ============================================================
 
 def resolve_job_description(
@@ -652,9 +635,6 @@ You are an expert technical recruiter and ATS analyst.
 
 Analyze ONE specific job posting.
 
-Your job is to identify meaningful requirements that
-should be used for resume matching.
-
 IGNORE:
 - privacy notices
 - EEO statements
@@ -663,77 +643,48 @@ IGNORE:
 - footer text
 - navigation
 - company boilerplate
+- duplicated content
 - generic wording
-- repeated phrases
-- unrelated jobs
 
 IMPORTANT:
-Do NOT split one technical concept into tiny words.
+Do not split technical concepts into tiny words.
 
 BAD:
-[
-  "database",
-  "systems",
-  "replication",
-  "debugging"
-]
+database
+replication
+debugging
 
 GOOD:
-[
-  "database replication",
-  "production debugging"
-]
+database replication
+production debugging
 
-Only include meaningful requirements.
+Identify only meaningful requirements.
 
 HARD SKILLS:
-Include actual technologies, programming languages,
-databases, frameworks, cloud services, debugging
-tools, testing systems, security technologies,
-infrastructure, and similar technical requirements.
+Actual technologies, programming languages,
+databases, frameworks, cloud services,
+testing tools, debugging tools, security,
+systems, infrastructure.
 
 SOFT SKILLS:
-Include actual behavioral requirements such as
-collaboration, communication, ownership,
-troubleshooting, reliability, customer focus,
-problem solving, and knowledge sharing.
+Communication, collaboration, ownership,
+troubleshooting, reliability, problem solving,
+customer focus, knowledge sharing.
 
 EXPERIENCE:
-Include meaningful experience requirements.
-Do not copy complete responsibility sentences.
+Only meaningful experience requirements.
 
 KEYWORDS:
-Choose important searchable phrases that matter
-for ATS matching.
+Important searchable job-specific phrases.
 
-KEEP LISTS COMPACT:
+Keep output focused:
 
-hard_skills:
-8-18 items
+hard_skills: 8-18
+soft_skills: 4-10
+experience_requirements: 3-8
+keywords: 10-25
 
-soft_skills:
-4-10 items
-
-experience_requirements:
-3-8 items
-
-keywords:
-10-25 items
-
-Avoid duplicates and overlapping items.
-
-Compound technical concepts should stay together.
-
-Examples:
-
-"database replication engines"
-is one requirement.
-
-"security vulnerability remediation"
-is one requirement.
-
-"multi-region production services"
-is one requirement.
+Avoid duplicates.
 
 Return ONLY JSON:
 
@@ -756,6 +707,9 @@ Return ONLY JSON:
 
 # ============================================================
 # JOB ANALYSIS
+#
+# This is intentionally only used by /analyze.
+# It is NOT called by /tailor to save time.
 # ============================================================
 
 def analyze_resume_against_job(
@@ -767,14 +721,9 @@ def analyze_resume_against_job(
     instructions = """
 You are an expert technical recruiter.
 
-Compare the candidate resume with the target role.
+Compare the resume with the target role.
 
 Never invent candidate experience.
-
-Clearly distinguish:
-- evidence in the resume
-- missing requirements
-- requirements that the job does not specify
 
 Return ONLY JSON:
 
@@ -787,6 +736,11 @@ Return ONLY JSON:
   "recommendations": [],
   "resume_issues": []
 }
+
+Clearly distinguish:
+- supported evidence
+- missing evidence
+- requirements not specified
 """
 
     payload = {
@@ -890,7 +844,7 @@ def ensure_target_title_in_summary(
 
 
 # ============================================================
-# TAILORING
+# SINGLE ATS TAILOR PASS
 # ============================================================
 
 def tailor_resume_with_ai(
@@ -930,147 +884,111 @@ def tailor_resume_with_ai(
     ).strip()
 
     instructions = f"""
-You are an elite ATS resume optimization specialist.
+You are an expert ATS resume optimizer.
 
-TARGET JOB:
+TARGET JOB TITLE:
 {target_title}
 
-OBJECTIVE:
-Create the strongest truthful ATS-aligned version of
-the candidate's resume for this specific role.
+Make the resume highly relevant to the role while
+remaining completely truthful.
 
 ============================================================
-ABSOLUTE TRUTH RULE
+STRICT TRUTH RULE
 ============================================================
 
 NEVER invent:
 
 - technologies
-- databases
 - programming languages
+- databases
+- tools
 - employers
-- positions held
+- titles held
 - dates
 - projects
 - certifications
 - education
 - metrics
-- production experience
 - responsibilities
 - achievements
+- production experience
 
-Use only information supported by the original resume.
-
-============================================================
-TITLE VISIBILITY
-============================================================
-
-The exact target job title should appear naturally in
-the professional summary.
-
-If the candidate never held that title, do not represent
-it as a previous job.
-
-Use language such as:
-
-"Software engineer with experience in X, targeting
-Software Development Engineer II (SDE2) opportunities."
+Use ONLY information supported by the original resume.
 
 ============================================================
-SKILL PRESERVATION
+TARGET TITLE
 ============================================================
 
-Preserve all relevant technical skills already present.
+Make the target title visible naturally in the professional
+summary.
 
-Translate equivalent terminology naturally.
+If the candidate did not hold the target title, do not claim
+that they did.
+
+A truthful example:
+
+"Software engineer with experience in backend systems,
+targeting Software Development Engineer II (SDE2) roles."
+
+============================================================
+SKILLS
+============================================================
+
+Preserve relevant existing skills.
+
+Use equivalent terminology when appropriate.
 
 Examples:
 
-AWS
-Amazon Web Services
+AWS -> Amazon Web Services
+C++ -> C/C++
+PostgreSQL -> Postgres
+SQL Server -> MSSQL
+CI/CD -> Continuous Integration / Continuous Delivery
 
-C++
-C/C++
-
-PostgreSQL
-Postgres
-
-SQL Server
-MSSQL
-
-CI/CD
-Continuous Integration / Continuous Delivery
-
-Do not add a skill simply because it appears in the job.
+Do NOT add unsupported skills.
 
 ============================================================
-MISSING HARD SKILLS
+CURRENT GAPS
 ============================================================
 
-"""
+Missing hard skills:
+{json.dumps(missing_hard_skills[:20])}
 
-    instructions += "\n".join(
-        f"- {item}"
-        for item in missing_hard_skills[:30]
-    )
+Missing soft skills:
+{json.dumps(missing_soft_skills[:15])}
 
-    instructions += """
+Missing keywords:
+{json.dumps(missing_keywords[:25])}
 
-============================================================
-MISSING SOFT SKILLS
-============================================================
-
-"""
-
-    instructions += "\n".join(
-        f"- {item}"
-        for item in missing_soft_skills[:20]
-    )
-
-    instructions += """
+Only surface a missing item if the original resume actually
+contains evidence supporting it.
 
 ============================================================
-MISSING KEYWORDS
+MEASURABLE ACHIEVEMENTS
 ============================================================
 
-"""
+Preserve real measurable evidence already present.
 
-    instructions += "\n".join(
-        f"- {item}"
-        for item in missing_keywords[:40]
-    )
+Examples:
+percentages
+latency
+throughput
+scale
+counts
+users
+records
+time savings
+performance improvements
+cost savings
 
-    instructions += """
-
-============================================================
-MEASURABLE RESULTS
-============================================================
-
-Look for REAL measurable achievements in the original resume.
-
-Use existing:
-- percentages
-- counts
-- scale
-- latency
-- time savings
-- performance improvements
-- cost savings
-- throughput
-- users
-- records
-- deployments
-- defect reductions
-
-Do NOT invent metrics.
-
-Make genuine existing measurements easy to identify.
+Never invent numbers.
 
 ============================================================
 WRITING
 ============================================================
 
-Use concise, evidence-based bullets.
+Use concise recruiter-friendly bullets.
 
 Prefer:
 
@@ -1078,139 +996,17 @@ Action + technology/process + result
 
 Do not keyword stuff.
 
-Do not make the resume unnaturally repetitive.
-
-Keep all employers, titles, dates, education, and projects
-accurate.
-
-============================================================
-RETURN JSON ONLY
-============================================================
-
-{
-  "name": "",
-  "email": "",
-  "phone": "",
-  "location": "",
-  "linkedin": "",
-  "github": "",
-  "summary": "",
-  "skills": [],
-  "experience": [
-    {
-      "title": "",
-      "company": "",
-      "location": "",
-      "dates": "",
-      "bullets": []
-    }
-  ],
-  "projects": [
-    {
-      "name": "",
-      "technologies": [],
-      "description": "",
-      "bullets": []
-    }
-  ],
-  "education": [
-    {
-      "degree": "",
-      "institution": "",
-      "location": "",
-      "dates": ""
-    }
-  ],
-  "certifications": []
-}
-"""
-
-    payload = {
-        "target_job_title":
-            target_title,
-
-        "job_description":
-            job_description,
-
-        "job_intelligence":
-            job_intelligence,
-
-        "current_ats":
-            current_ats,
-
-        "original_resume":
-            original_resume,
-
-        "original_resume_text":
-            resume_text,
-    }
-
-    return call_json_model(
-        instructions,
-        json.dumps(
-            payload,
-            indent=2,
-        ),
-    )
-
-
-# ============================================================
-# FINAL RESUME QUALITY CONTROL
-# ============================================================
-
-def repair_resume_for_jobscan(
-    resume: dict[str, Any],
-    original_resume: dict[str, Any],
-    job_description: str,
-    job_intelligence: dict[str, Any],
-    ats: dict[str, Any],
-) -> dict[str, Any]:
-
-    target_title = (
-        job_intelligence.get(
-            "job_title"
-        )
-        or ""
-    ).strip()
-
-    instructions = f"""
-You are performing a final ATS resume quality-control pass.
-
-TARGET TITLE:
-{target_title}
-
-Improve ATS searchability and job alignment.
-
-STRICT:
-Only use facts from the original resume.
-
-Do NOT invent:
-- technology
-- employer
-- job title held
+Preserve:
+- employers
+- original job titles
 - dates
-- projects
-- metrics
-- responsibilities
-- certifications
+- legitimate projects
 - education
-- achievements
+- certifications
 
-CHECK:
-
-1. Target title is visible naturally in the summary.
-2. Existing relevant technical skills are preserved.
-3. Supported job terminology is visible.
-4. Important job-relevant skills are easy to find.
-5. Existing measurable achievements remain visible.
-6. Employers remain unchanged.
-7. Original job titles remain unchanged.
-8. Dates remain unchanged.
-9. Education remains unchanged.
-10. Projects remain unchanged unless only wording is improved.
-11. No unsupported skills.
-12. No keyword stuffing.
-13. Resume remains readable.
+============================================================
+OUTPUT
+============================================================
 
 Return ONLY JSON:
 
@@ -1253,8 +1049,11 @@ Return ONLY JSON:
 """
 
     payload = {
-        "target_job_title":
-            target_title,
+        "resume_text":
+            resume_text,
+
+        "original_resume":
+            original_resume,
 
         "job_description":
             job_description,
@@ -1262,14 +1061,8 @@ Return ONLY JSON:
         "job_intelligence":
             job_intelligence,
 
-        "original_resume":
-            original_resume,
-
-        "current_resume":
-            resume,
-
-        "ats":
-            ats,
+        "current_ats":
+            current_ats,
     }
 
     return call_json_model(
@@ -1282,7 +1075,15 @@ Return ONLY JSON:
 
 
 # ============================================================
-# MULTI-ROUND OPTIMIZATION
+# FAST OPTIMIZATION
+#
+# Usually:
+#   3 AI calls total
+#
+# Worst case:
+#   4 AI calls total
+#
+# Previous pipeline could make ~9 calls.
 # ============================================================
 
 def optimize_resume_for_ats(
@@ -1291,34 +1092,125 @@ def optimize_resume_for_ats(
     job_intelligence: dict[str, Any],
     original_resume: dict[str, Any],
     baseline_ats: dict[str, Any],
-    max_rounds: int = 5,
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
     int,
 ]:
 
-    best_resume = original_resume
+    best_resume = (
+        original_resume
+    )
 
-    best_ats = baseline_ats
+    best_ats = (
+        baseline_ats
+    )
 
     best_score = int(
         baseline_ats.get(
             "match_rate",
             0,
         )
+        or 0
     )
 
     rounds_completed = 0
 
-    for round_number in range(
-        1,
-        max_rounds + 1,
-    ):
+    # ========================================================
+    # PASS 1
+    # ========================================================
 
-        rounds_completed = round_number
+    candidate_resume = (
+        tailor_resume_with_ai(
+            resume_text=resume_text,
+            job_description=job_description,
+            job_intelligence=job_intelligence,
+            original_resume=original_resume,
+            current_ats=best_ats,
+        )
+    )
 
-        candidate_resume = (
+    candidate_resume = (
+        ensure_target_title_in_summary(
+            candidate_resume,
+            job_intelligence.get(
+                "job_title",
+                "",
+            ),
+        )
+    )
+
+    candidate_ats = build_ats_audit(
+        resume=candidate_resume,
+        job_intelligence=job_intelligence,
+        filename="tailored-resume.docx",
+        file_type="DOCX",
+    )
+
+    candidate_score = int(
+        candidate_ats.get(
+            "match_rate",
+            0,
+        )
+        or 0
+    )
+
+    rounds_completed = 1
+
+    if candidate_score >= best_score:
+
+        best_resume = candidate_resume
+
+        best_ats = candidate_ats
+
+        best_score = candidate_score
+
+
+    # ========================================================
+    # STOP EARLY
+    # ========================================================
+
+    if best_score >= 90:
+
+        return (
+            best_resume,
+            best_ats,
+            rounds_completed,
+        )
+
+
+    # ========================================================
+    # ONLY RUN PASS 2 WHEN IT CAN ACTUALLY HELP
+    #
+    # If score already improved substantially,
+    # do another pass.
+    #
+    # If there was no improvement at all,
+    # don't waste another AI call.
+    # ========================================================
+
+    improvement = (
+        best_score
+        - int(
+            baseline_ats.get(
+                "match_rate",
+                0,
+            )
+            or 0
+        )
+    )
+
+    should_run_second_pass = (
+        best_score < 90
+        and (
+            improvement >= 3
+            or best_score < 55
+        )
+    )
+
+    if should_run_second_pass:
+
+        second_resume = (
             tailor_resume_with_ai(
                 resume_text=resume_text,
                 job_description=job_description,
@@ -1328,73 +1220,46 @@ def optimize_resume_for_ats(
             )
         )
 
-        candidate_ats = build_ats_audit(
-            resume=candidate_resume,
+        second_resume = (
+            ensure_target_title_in_summary(
+                second_resume,
+                job_intelligence.get(
+                    "job_title",
+                    "",
+                ),
+            )
+        )
+
+        second_ats = build_ats_audit(
+            resume=second_resume,
             job_intelligence=job_intelligence,
             filename="tailored-resume.docx",
             file_type="DOCX",
         )
 
-        candidate_score = int(
-            candidate_ats.get(
+        second_score = int(
+            second_ats.get(
                 "match_rate",
                 0,
             )
+            or 0
         )
 
-        if candidate_score > best_score:
+        rounds_completed = 2
 
-            best_resume = candidate_resume
+        if second_score > best_score:
 
-            best_ats = candidate_ats
+            best_resume = (
+                second_resume
+            )
 
-            best_score = candidate_score
+            best_ats = (
+                second_ats
+            )
 
-        if best_score >= 90:
-
-            break
-
-    repaired_resume = (
-        repair_resume_for_jobscan(
-            resume=best_resume,
-            original_resume=original_resume,
-            job_description=job_description,
-            job_intelligence=job_intelligence,
-            ats=best_ats,
-        )
-    )
-
-    repaired_resume = (
-        ensure_target_title_in_summary(
-            repaired_resume,
-            job_intelligence.get(
-                "job_title",
-                "",
-            ),
-        )
-    )
-
-    repaired_ats = build_ats_audit(
-        resume=repaired_resume,
-        job_intelligence=job_intelligence,
-        filename="tailored-resume.docx",
-        file_type="DOCX",
-    )
-
-    repaired_score = int(
-        repaired_ats.get(
-            "match_rate",
-            0,
-        )
-    )
-
-    if repaired_score > best_score:
-
-        best_resume = repaired_resume
-
-        best_ats = repaired_ats
-
-        best_score = repaired_score
+            best_score = (
+                second_score
+            )
 
     return (
         best_resume,
@@ -1417,7 +1282,7 @@ You are an expert professional cover letter writer.
 
 Create a focused professional cover letter.
 
-Use only facts supported by the resume.
+Use ONLY facts supported by the resume.
 
 Never invent:
 - employers
@@ -1497,17 +1362,19 @@ def add_heading_line(
     title: str,
 ):
 
-    p = document.add_paragraph()
+    paragraph = (
+        document.add_paragraph()
+    )
 
-    p.paragraph_format.space_before = Pt(
+    paragraph.paragraph_format.space_before = Pt(
         9
     )
 
-    p.paragraph_format.space_after = Pt(
+    paragraph.paragraph_format.space_after = Pt(
         4
     )
 
-    run = p.add_run(
+    run = paragraph.add_run(
         title.upper()
     )
 
@@ -1518,7 +1385,8 @@ def add_heading_line(
     )
 
     p_pr = (
-        p._p.get_or_add_pPr()
+        paragraph._p
+        .get_or_add_pPr()
     )
 
     p_bdr = OxmlElement(
@@ -1596,15 +1464,15 @@ def render_resume_docx(
         0.65
     )
 
-    # NAME
+    paragraph = (
+        document.add_paragraph()
+    )
 
-    p = document.add_paragraph()
-
-    p.alignment = (
+    paragraph.alignment = (
         WD_ALIGN_PARAGRAPH.CENTER
     )
 
-    run = p.add_run(
+    run = paragraph.add_run(
         resume.get(
             "name"
         )
@@ -1617,24 +1485,12 @@ def render_resume_docx(
         bold=True,
     )
 
-    # CONTACT
-
     contact = [
-        resume.get(
-            "location"
-        ),
-        resume.get(
-            "email"
-        ),
-        resume.get(
-            "phone"
-        ),
-        resume.get(
-            "linkedin"
-        ),
-        resume.get(
-            "github"
-        ),
+        resume.get("location"),
+        resume.get("email"),
+        resume.get("phone"),
+        resume.get("linkedin"),
+        resume.get("github"),
     ]
 
     contact = [
@@ -1645,17 +1501,15 @@ def render_resume_docx(
 
     if contact:
 
-        p = document.add_paragraph()
+        paragraph = (
+            document.add_paragraph()
+        )
 
-        p.alignment = (
+        paragraph.alignment = (
             WD_ALIGN_PARAGRAPH.CENTER
         )
 
-        p.paragraph_format.space_after = Pt(
-            7
-        )
-
-        run = p.add_run(
+        run = paragraph.add_run(
             " | ".join(
                 contact
             )
@@ -1666,8 +1520,6 @@ def render_resume_docx(
             size=8.5,
         )
 
-    # SUMMARY
-
     if resume.get(
         "summary"
     ):
@@ -1677,13 +1529,13 @@ def render_resume_docx(
             "Professional Summary",
         )
 
-        p = document.add_paragraph()
+        paragraph = (
+            document.add_paragraph()
+        )
 
-        run = p.add_run(
+        run = paragraph.add_run(
             str(
-                resume[
-                    "summary"
-                ]
+                resume["summary"]
             )
         )
 
@@ -1691,8 +1543,6 @@ def render_resume_docx(
             run,
             size=9.3,
         )
-
-    # SKILLS
 
     skills = (
         resume.get(
@@ -1708,9 +1558,11 @@ def render_resume_docx(
             "Technical Skills",
         )
 
-        p = document.add_paragraph()
+        paragraph = (
+            document.add_paragraph()
+        )
 
-        run = p.add_run(
+        run = paragraph.add_run(
             ", ".join(
                 str(item)
                 for item in skills
@@ -1721,8 +1573,6 @@ def render_resume_docx(
             run,
             size=9.1,
         )
-
-    # EXPERIENCE
 
     experience = (
         resume.get(
@@ -1746,9 +1596,11 @@ def render_resume_docx(
             ):
                 continue
 
-            p = document.add_paragraph()
+            paragraph = (
+                document.add_paragraph()
+            )
 
-            run = p.add_run(
+            run = paragraph.add_run(
                 job.get(
                     "title"
                 )
@@ -1767,7 +1619,7 @@ def render_resume_docx(
 
             if dates:
 
-                run = p.add_run(
+                run = paragraph.add_run(
                     f" | {dates}"
                 )
 
@@ -1776,30 +1628,34 @@ def render_resume_docx(
                     size=8.8,
                 )
 
-            company = job.get(
-                "company"
-            )
-
-            location = job.get(
-                "location"
-            )
-
-            company_text = (
-                company
+            company = (
+                job.get(
+                    "company"
+                )
                 or ""
             )
 
-            if location:
+            location = (
+                job.get(
+                    "location"
+                )
+                or ""
+            )
 
+            company_text = company
+
+            if location:
                 company_text += (
                     f" | {location}"
                 )
 
             if company_text:
 
-                p = document.add_paragraph()
+                paragraph = (
+                    document.add_paragraph()
+                )
 
-                run = p.add_run(
+                run = paragraph.add_run(
                     company_text
                 )
 
@@ -1815,21 +1671,23 @@ def render_resume_docx(
                 or []
             ):
 
-                p = document.add_paragraph()
+                paragraph = (
+                    document.add_paragraph()
+                )
 
-                p.paragraph_format.left_indent = Inches(
+                paragraph.paragraph_format.left_indent = Inches(
                     0.18
                 )
 
-                p.paragraph_format.first_line_indent = Inches(
+                paragraph.paragraph_format.first_line_indent = Inches(
                     -0.13
                 )
 
-                p.paragraph_format.space_after = Pt(
+                paragraph.paragraph_format.space_after = Pt(
                     2
                 )
 
-                run = p.add_run(
+                run = paragraph.add_run(
                     "• "
                     + str(
                         bullet
@@ -1840,8 +1698,6 @@ def render_resume_docx(
                     run,
                     size=9,
                 )
-
-    # PROJECTS
 
     projects = (
         resume.get(
@@ -1865,9 +1721,11 @@ def render_resume_docx(
             ):
                 continue
 
-            p = document.add_paragraph()
+            paragraph = (
+                document.add_paragraph()
+            )
 
-            run = p.add_run(
+            run = paragraph.add_run(
                 project.get(
                     "name"
                 )
@@ -1889,7 +1747,7 @@ def render_resume_docx(
 
             if technologies:
 
-                run = p.add_run(
+                run = paragraph.add_run(
                     " | "
                     + ", ".join(
                         str(item)
@@ -1902,17 +1760,21 @@ def render_resume_docx(
                     size=8.7,
                 )
 
-            if project.get(
-                "description"
-            ):
+            description = (
+                project.get(
+                    "description"
+                )
+            )
 
-                p = document.add_paragraph()
+            if description:
 
-                run = p.add_run(
+                paragraph = (
+                    document.add_paragraph()
+                )
+
+                run = paragraph.add_run(
                     str(
-                        project[
-                            "description"
-                        ]
+                        description
                     )
                 )
 
@@ -1928,17 +1790,19 @@ def render_resume_docx(
                 or []
             ):
 
-                p = document.add_paragraph()
+                paragraph = (
+                    document.add_paragraph()
+                )
 
-                p.paragraph_format.left_indent = Inches(
+                paragraph.paragraph_format.left_indent = Inches(
                     0.18
                 )
 
-                p.paragraph_format.first_line_indent = Inches(
+                paragraph.paragraph_format.first_line_indent = Inches(
                     -0.13
                 )
 
-                run = p.add_run(
+                run = paragraph.add_run(
                     "• "
                     + str(
                         bullet
@@ -1949,8 +1813,6 @@ def render_resume_docx(
                     run,
                     size=9,
                 )
-
-    # EDUCATION
 
     education = (
         resume.get(
@@ -1974,9 +1836,11 @@ def render_resume_docx(
             ):
                 continue
 
-            p = document.add_paragraph()
+            paragraph = (
+                document.add_paragraph()
+            )
 
-            run = p.add_run(
+            run = paragraph.add_run(
                 item.get(
                     "degree"
                 )
@@ -2017,7 +1881,7 @@ def render_resume_docx(
 
             if details:
 
-                run = p.add_run(
+                run = paragraph.add_run(
                     "\n"
                     + " | ".join(
                         details
@@ -2028,8 +1892,6 @@ def render_resume_docx(
                     run,
                     size=8.8,
                 )
-
-    # CERTIFICATIONS
 
     certifications = (
         resume.get(
@@ -2047,9 +1909,11 @@ def render_resume_docx(
 
         for certification in certifications:
 
-            p = document.add_paragraph()
+            paragraph = (
+                document.add_paragraph()
+            )
 
-            run = p.add_run(
+            run = paragraph.add_run(
                 "• "
                 + str(
                     certification
@@ -2119,9 +1983,11 @@ def render_cover_letter_docx(
             "\n"
         ):
 
-            p = document.add_paragraph()
+            paragraph = (
+                document.add_paragraph()
+            )
 
-            run = p.add_run(
+            run = paragraph.add_run(
                 block
             )
 
@@ -2136,13 +2002,13 @@ def render_cover_letter_docx(
             "date"
         ):
 
-            p = document.add_paragraph()
+            paragraph = (
+                document.add_paragraph()
+            )
 
-            run = p.add_run(
+            run = paragraph.add_run(
                 str(
-                    letter[
-                        "date"
-                    ]
+                    letter["date"]
                 )
             )
 
@@ -2151,9 +2017,11 @@ def render_cover_letter_docx(
                 size=11,
             )
 
-        p = document.add_paragraph()
+        paragraph = (
+            document.add_paragraph()
+        )
 
-        run = p.add_run(
+        run = paragraph.add_run(
             letter.get(
                 "salutation"
             )
@@ -2169,13 +2037,13 @@ def render_cover_letter_docx(
             "opening"
         ):
 
-            p = document.add_paragraph()
+            paragraph = (
+                document.add_paragraph()
+            )
 
-            run = p.add_run(
+            run = paragraph.add_run(
                 str(
-                    letter[
-                        "opening"
-                    ]
+                    letter["opening"]
                 )
             )
 
@@ -2184,22 +2052,24 @@ def render_cover_letter_docx(
                 size=11,
             )
 
-        for paragraph in (
+        for body in (
             letter.get(
                 "body_paragraphs"
             )
             or []
         ):
 
-            p = document.add_paragraph()
+            paragraph = (
+                document.add_paragraph()
+            )
 
-            p.paragraph_format.space_after = Pt(
+            paragraph.paragraph_format.space_after = Pt(
                 9
             )
 
-            run = p.add_run(
+            run = paragraph.add_run(
                 str(
-                    paragraph
+                    body
                 )
             )
 
@@ -2208,9 +2078,11 @@ def render_cover_letter_docx(
                 size=11,
             )
 
-        p = document.add_paragraph()
+        paragraph = (
+            document.add_paragraph()
+        )
 
-        run = p.add_run(
+        run = paragraph.add_run(
             letter.get(
                 "closing"
             )
@@ -2222,9 +2094,11 @@ def render_cover_letter_docx(
             size=11,
         )
 
-        p = document.add_paragraph()
+        paragraph = (
+            document.add_paragraph()
+        )
 
-        run = p.add_run(
+        run = paragraph.add_run(
             letter.get(
                 "signature"
             )
@@ -2250,6 +2124,9 @@ def render_cover_letter_docx(
 
 # ============================================================
 # ANALYZE
+#
+# Detailed analysis remains available when the user
+# explicitly clicks Analyze Job.
 # ============================================================
 
 @app.post("/analyze")
@@ -2277,8 +2154,10 @@ async def analyze(
 
     try:
 
-        resume_data = structure_resume(
-            resume_text
+        resume_data = (
+            structure_resume(
+                resume_text
+            )
         )
 
         job_intelligence = (
@@ -2339,7 +2218,7 @@ async def analyze(
 
 
 # ============================================================
-# TAILOR
+# FAST TAILOR
 # ============================================================
 
 @app.post("/tailor")
@@ -2367,11 +2246,21 @@ async def tailor(
 
     try:
 
+        # ====================================================
+        # AI CALL 1
+        # Parse resume
+        # ====================================================
+
         original_resume = (
             structure_resume(
                 resume_text
             )
         )
+
+        # ====================================================
+        # AI CALL 2
+        # Extract job intelligence
+        # ====================================================
 
         job_intelligence = (
             extract_job_intelligence(
@@ -2379,13 +2268,11 @@ async def tailor(
             )
         )
 
-        analysis = (
-            analyze_resume_against_job(
-                resume_text,
-                final_job_description,
-                job_intelligence,
-            )
-        )
+        # ====================================================
+        # LOCAL ATS
+        #
+        # No AI call.
+        # ====================================================
 
         original_file_type = (
             "PDF"
@@ -2402,6 +2289,11 @@ async def tailor(
             file_type=original_file_type,
         )
 
+        # ====================================================
+        # AI CALL 3
+        # Tailor resume
+        # ====================================================
+
         (
             tailored_resume,
             tailored_ats,
@@ -2412,8 +2304,11 @@ async def tailor(
             job_intelligence=job_intelligence,
             original_resume=original_resume,
             baseline_ats=baseline_ats,
-            max_rounds=5,
         )
+
+        # ====================================================
+        # LOCAL ATS RECHECK
+        # ====================================================
 
         tailored_resume = (
             ensure_target_title_in_summary(
@@ -2437,6 +2332,7 @@ async def tailor(
                 "match_rate",
                 0,
             )
+            or 0
         )
 
         tailored_score = int(
@@ -2444,6 +2340,7 @@ async def tailor(
                 "match_rate",
                 0,
             )
+            or 0
         )
 
         score_change = (
@@ -2476,6 +2373,42 @@ async def tailor(
         ] = (
             tailored_score >= 90
         )
+
+        # Lightweight analysis.
+        #
+        # We deliberately do NOT run the expensive
+        # analyze_resume_against_job() call here.
+
+        analysis = {
+            "summary": (
+                "Resume tailored and checked "
+                "against the target job."
+            ),
+
+            "matching_skills":
+                tailored_ats.get(
+                    "matched_hard_skills",
+                    [],
+                ),
+
+            "skill_gaps":
+                tailored_ats.get(
+                    "missing_hard_skills",
+                    [],
+                ),
+
+            "experience_comparison":
+                "",
+
+            "education_comparison":
+                "",
+
+            "recommendations":
+                [],
+
+            "resume_issues":
+                [],
+        }
 
     except HTTPException:
         raise
