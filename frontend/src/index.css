@@ -1,34 +1,9 @@
-* {
-  box-sizing: border-box;
-}
-
-html,
-body,
-#root {
-  width: 100%;
-  min-width: 320px;
-  min-height: 100%;
-  margin: 0;
-  padding: 0;
-}
-
-html {
-  background: #070b14;
-}
-
+html, body, #root { min-height: 100%; }
 body {
   margin: 0;
-  background: #070b14;
-  color: #f5f7fb;
-  overflow-x: hidden;
+  background: #f4f6f2;
 }
-
-button,
-input,
-textarea {
-  font: inherit;
-}
-
-button {
-  cursor: pointer;
+::selection {
+  background: #cfe3d7;
+  color: #173b31;
 }
